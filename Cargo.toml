@@ -1,0 +1,8 @@
+[package]
+name = "codexia"
+version = "0.1.0"
+edition = "2021"
+description = "Book Agent — compile EPUB into structured Book Intelligence Packages"
+
+[dependencies]
+pagelet = { path = "../pagelet/crates/pagelet" }
