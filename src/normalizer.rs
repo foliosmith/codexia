@@ -5,14 +5,21 @@
 //!              → normalise_chapters → BookIR
 //!              → serialise → JSON / JSONL / structure.json
 
-use std::{collections::BTreeMap, sync::Arc};
-
-use pagelet::{
-    document::ChapterIr as PageletChapterIr,
-    epub::filter_noise_chapters,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
 };
 
-use crate::ir::{Block, BookIr, Chapter, ChapterSummary, CompiledOutput, Manifest, Metadata, Profile, SourceRef, Structure, TocEntry};
+use pagelet::{
+    core::NodeId,
+    document::{ChapterIr as PageletChapterIr, DocumentNode},
+    epub::is_likely_noise_chapter,
+};
+
+use crate::ir::{
+    Block, BookIr, Chapter, ChapterSummary, CompiledOutput, Manifest, Metadata, Profile, SourceRef,
+    SpineEntry, Structure, TocEntry,
+};
 
 /// Normaliser configuration.
 #[derive(Debug, Clone)]
@@ -34,29 +41,16 @@ impl Default for NormaliserOptions {
 pub fn normalise(
     chapters: &[PageletChapterIr],
     toc: &[TocEntry],
+    spine: &[SpineEntry],
     metadata: &Metadata,
     options: &NormaliserOptions,
 ) -> BookIr {
-    let spine_len = chapters.len();
-    let mut noise_indices = BTreeMap::new();
-
-    if options.filter_noise {
-        let chapter_infos: Vec<(usize, String, &str)> = chapters
-            .iter()
-            .enumerate()
-            .map(|(i, ch)| (i, ch.visible_text(), ch.title.as_ref()))
-            .collect();
-        let refs: Vec<(usize, &str, &str)> = chapter_infos
-            .iter()
-            .map(|(i, text, title)| (*i, &**title, text.as_str()))
-            .collect();
-        let filtered = filter_noise_chapters(&refs, spine_len);
-        for (i, _ch) in chapters.iter().enumerate() {
-            if !filtered.contains(&i) {
-                noise_indices.insert(i, true);
-            }
-        }
-    }
+    let noise_indices = detect_noise_chapters(chapters, options.filter_noise);
+    let repeated_boundaries = if options.filter_noise {
+        repeated_boundary_fingerprints(chapters, &noise_indices)
+    } else {
+        BTreeSet::new()
+    };
 
     let mut ir_chapters = Vec::new();
     let mut ir_blocks = Vec::new();
@@ -65,9 +59,28 @@ pub fn normalise(
         let spine_index = spine_index as u32;
         let is_noise = noise_indices.contains_key(&(spine_index as usize));
 
-        let visible_text = chapter.visible_text();
         let blocks = chapter.blocks();
-        let block_count = blocks.len() as u32;
+        let boundary_fingerprints = boundary_fingerprints(&blocks);
+        let retained_blocks = if is_noise {
+            Vec::new()
+        } else {
+            blocks
+                .into_iter()
+                .filter(|block| {
+                    let fingerprint = block_fingerprint(block);
+                    !repeated_boundaries.contains(&fingerprint)
+                        || !boundary_fingerprints.contains(&fingerprint)
+                })
+                .collect::<Vec<_>>()
+        };
+        let block_count = retained_blocks.len() as u32;
+        let visible_text = retained_blocks
+            .iter()
+            .map(|block| block.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let semantic_kinds = semantic_block_kinds(chapter);
 
         ir_chapters.push(Chapter {
             spine_index,
@@ -76,44 +89,47 @@ pub fn normalise(
             block_count,
             visible_text: Arc::from(visible_text),
             content_hash: hex_encode(chapter.content_hash.as_bytes()),
+            is_noise,
         });
 
-        if !is_noise {
-            for block in blocks {
-                let cfi = chapter
-                    .node_cfi(block.node_id, spine_index, None)
-                    .map(|cfi| cfi.to_cfi_string());
-                ir_blocks.push(Block {
-                    block_id: block.block_id.clone(),
-                    chapter_index: spine_index,
-                    order: block.order,
-                    kind: block.kind.clone(),
-                    text: Arc::from(block.text),
-                    source_ref: SourceRef {
-                        chapter_href: chapter.href.clone(),
-                        spine_index,
-                        node_id: block.node_id.get(),
-                        cfi,
-                    },
-                });
-            }
+        for block in retained_blocks {
+            let text_fingerprint = block_fingerprint(&block);
+            let cfi = chapter
+                .node_cfi(block.node_id, spine_index, None)
+                .map(|cfi| cfi.to_cfi_string());
+            let kind = semantic_kinds
+                .get(&block.node_id.get())
+                .copied()
+                .unwrap_or(block.kind.as_str())
+                .to_owned();
+            ir_blocks.push(Block {
+                block_id: block.block_id.clone(),
+                chapter_index: spine_index,
+                order: block.order,
+                kind,
+                text: Arc::from(block.text),
+                text_fingerprint,
+                source_ref: SourceRef {
+                    chapter_href: chapter.href.clone(),
+                    spine_index,
+                    node_id: block.node_id.get(),
+                    cfi,
+                },
+            });
         }
     }
 
     BookIr {
         metadata: metadata.clone(),
         toc: toc.to_vec(),
+        spine: spine.to_vec(),
         chapters: ir_chapters,
         blocks: ir_blocks,
     }
 }
 
 /// Build a compiled package from a BookIR.
-pub fn compile(
-    book_ir: &BookIr,
-    profile: Profile,
-    source_hash: &str,
-) -> CompiledOutput {
+pub fn compile(book_ir: &BookIr, profile: Profile, source_hash: &str) -> CompiledOutput {
     let chapter_summaries: Vec<ChapterSummary> = book_ir
         .chapters
         .iter()
@@ -121,7 +137,7 @@ pub fn compile(
             spine_index: ch.spine_index,
             title: ch.title.clone(),
             block_count: ch.block_count,
-            is_noise: false,
+            is_noise: ch.is_noise,
         })
         .collect();
 
@@ -149,13 +165,172 @@ pub fn compile(
     }
 }
 
+fn detect_noise_chapters(chapters: &[PageletChapterIr], enabled: bool) -> BTreeMap<usize, bool> {
+    if !enabled {
+        return BTreeMap::new();
+    }
+
+    let spine_len = chapters.len();
+    chapters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, chapter)| {
+            let text = chapter.visible_text();
+            is_codexia_noise_chapter(&chapter.title, &text, index, spine_len)
+                .then_some((index, true))
+        })
+        .collect()
+}
+
+fn is_codexia_noise_chapter(
+    title: &str,
+    visible_text: &str,
+    spine_index: usize,
+    spine_len: usize,
+) -> bool {
+    if is_likely_noise_chapter(title, visible_text, spine_index, spine_len) {
+        return true;
+    }
+
+    let title = title.trim().to_lowercase();
+    let explicit_noise_titles = [
+        "contents",
+        "table of contents",
+        "目录",
+        "advertisement",
+        "advertisements",
+        "sponsored message",
+        "about the publisher",
+    ];
+
+    explicit_noise_titles
+        .iter()
+        .any(|candidate| title == *candidate || title.starts_with(&format!("{candidate}:")))
+}
+
+fn repeated_boundary_fingerprints(
+    chapters: &[PageletChapterIr],
+    noise_indices: &BTreeMap<usize, bool>,
+) -> BTreeSet<String> {
+    let content_chapter_count = chapters.len().saturating_sub(noise_indices.len());
+    if content_chapter_count < 2 {
+        return BTreeSet::new();
+    }
+
+    let mut counts = BTreeMap::<String, usize>::new();
+    for (index, chapter) in chapters.iter().enumerate() {
+        if noise_indices.contains_key(&index) {
+            continue;
+        }
+        for fingerprint in boundary_fingerprints(&chapter.blocks()) {
+            *counts.entry(fingerprint).or_default() += 1;
+        }
+    }
+
+    let threshold = 2.max((content_chapter_count * 3).div_ceil(5));
+    counts
+        .into_iter()
+        .filter_map(|(fingerprint, count)| (count >= threshold).then_some(fingerprint))
+        .collect()
+}
+
+fn boundary_fingerprints(blocks: &[pagelet::document::ChapterBlock]) -> BTreeSet<String> {
+    let candidates = blocks
+        .iter()
+        .filter(|block| {
+            let length = block.text.trim().chars().count();
+            length > 0 && length <= 160
+        })
+        .collect::<Vec<_>>();
+    let mut fingerprints = BTreeSet::new();
+    if let Some(first) = candidates.first() {
+        fingerprints.insert(block_fingerprint(first));
+    }
+    if let Some(last) = candidates.last() {
+        fingerprints.insert(block_fingerprint(last));
+    }
+    fingerprints
+}
+
+fn block_fingerprint(block: &pagelet::document::ChapterBlock) -> String {
+    hex_encode(block.fingerprint.hash().as_bytes())
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SemanticContext {
+    Plain,
+    List,
+    ListItem,
+    BlockQuote,
+}
+
+fn semantic_block_kinds(chapter: &PageletChapterIr) -> BTreeMap<u32, &'static str> {
+    let mut kinds = BTreeMap::new();
+    collect_semantic_block_kinds(chapter, chapter.root, SemanticContext::Plain, &mut kinds);
+    kinds
+}
+
+fn collect_semantic_block_kinds(
+    chapter: &PageletChapterIr,
+    node_id: NodeId,
+    context: SemanticContext,
+    kinds: &mut BTreeMap<u32, &'static str>,
+) {
+    let Some(node) = chapter.nodes.get(node_id) else {
+        return;
+    };
+
+    match node {
+        DocumentNode::Paragraph(_) => {
+            let kind = match context {
+                SemanticContext::Plain => "paragraph",
+                SemanticContext::List => "list",
+                SemanticContext::ListItem => "list-item",
+                SemanticContext::BlockQuote => "blockquote",
+            };
+            kinds.insert(node_id.get(), kind);
+        }
+        DocumentNode::Heading(_) => {}
+        DocumentNode::List(_) => {
+            visit_semantic_children(chapter, node, SemanticContext::List, kinds);
+        }
+        DocumentNode::ListItem(_) => {
+            let next_context = if context == SemanticContext::BlockQuote {
+                context
+            } else {
+                SemanticContext::ListItem
+            };
+            visit_semantic_children(chapter, node, next_context, kinds);
+        }
+        DocumentNode::BlockQuote(_) => {
+            visit_semantic_children(chapter, node, SemanticContext::BlockQuote, kinds);
+        }
+        DocumentNode::Footnote(_) => {}
+        _ => visit_semantic_children(chapter, node, context, kinds),
+    }
+}
+
+fn visit_semantic_children(
+    chapter: &PageletChapterIr,
+    node: &DocumentNode,
+    context: SemanticContext,
+    kinds: &mut BTreeMap<u32, &'static str>,
+) {
+    for child in node.children() {
+        collect_semantic_block_kinds(chapter, *child, context, kinds);
+    }
+}
+
 /// Serialize blocks as JSONL (one JSON object per line).
 #[must_use]
 pub fn blocks_jsonl(blocks: &[Block]) -> String {
     let mut out = String::new();
     for block in blocks {
         out.push('{');
-        out.push_str(&format!("\"block_id\": \"{}\", ", escape_json_str(&block.block_id)));
+        out.push_str(&format!(
+            "\"block_id\": \"{}\", ",
+            escape_json_str(&block.block_id)
+        ));
         out.push_str(&format!("\"chapter_index\": {}, ", block.chapter_index));
         out.push_str(&format!("\"order\": {}, ", block.order));
         out.push_str(&format!("\"kind\": \"{}\", ", escape_json_str(&block.kind)));
@@ -209,7 +384,13 @@ pub fn structure_json(structure: &Structure) -> String {
 pub fn manifest_json(manifest: &Manifest) -> String {
     let mut out = String::new();
     out.push_str("{\n");
-    push_field_str(&mut out, 1, "format_version", &manifest.format_version, true);
+    push_field_str(
+        &mut out,
+        1,
+        "format_version",
+        &manifest.format_version,
+        true,
+    );
     push_field_str(&mut out, 1, "profile", &manifest.profile, true);
     push_field_str(&mut out, 1, "source_hash", &manifest.source_hash, true);
     push_field_str(&mut out, 1, "created_at", &manifest.created_at, true);
@@ -238,11 +419,13 @@ fn chrono_now() -> String {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 fn push_field_str(out: &mut String, level: usize, name: &str, value: &str, trailing: bool) {
@@ -322,7 +505,7 @@ mod tests {
             language: Some(Arc::from("en")),
             package_version: Arc::from("3.0"),
         };
-        let ir = normalise(&[], &[], &metadata, &NormaliserOptions::default());
+        let ir = normalise(&[], &[], &[], &metadata, &NormaliserOptions::default());
         assert_eq!(ir.chapters.len(), 0);
         assert_eq!(ir.blocks.len(), 0);
     }

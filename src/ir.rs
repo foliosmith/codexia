@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub struct BookIr {
     pub metadata: Metadata,
     pub toc: Vec<TocEntry>,
+    pub spine: Vec<SpineEntry>,
     pub chapters: Vec<Chapter>,
     pub blocks: Vec<Block>,
 }
@@ -34,6 +35,15 @@ pub struct TocEntry {
     pub children: Vec<TocEntry>,
 }
 
+/// One item in the EPUB reading order.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SpineEntry {
+    pub spine_index: u32,
+    pub idref: Arc<str>,
+    pub href: Option<Arc<str>>,
+    pub linear: bool,
+}
+
 /// One chapter in the book.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Chapter {
@@ -43,6 +53,7 @@ pub struct Chapter {
     pub block_count: u32,
     pub visible_text: Arc<str>,
     pub content_hash: String,
+    pub is_noise: bool,
 }
 
 /// One text-bearing content block.
@@ -53,6 +64,7 @@ pub struct Block {
     pub order: u32,
     pub kind: String,
     pub text: Arc<str>,
+    pub text_fingerprint: String,
     pub source_ref: SourceRef,
 }
 
@@ -117,14 +129,50 @@ pub fn book_ir_to_json(ir: &BookIr) -> String {
     let mut out = String::new();
     out.push_str("{\n");
     push_json_str_opt(&mut out, 1, "title", ir.metadata.title.as_deref(), true);
-    push_json_str_opt(&mut out, 1, "identifier", ir.metadata.identifier.as_deref(), true);
-    push_json_str_opt(&mut out, 1, "language", ir.metadata.language.as_deref(), true);
-    push_json_str(&mut out, 1, "package_version", &ir.metadata.package_version, true);
+    push_json_str_opt(
+        &mut out,
+        1,
+        "identifier",
+        ir.metadata.identifier.as_deref(),
+        true,
+    );
+    push_json_str_opt(
+        &mut out,
+        1,
+        "language",
+        ir.metadata.language.as_deref(),
+        true,
+    );
+    push_json_str(
+        &mut out,
+        1,
+        "package_version",
+        &ir.metadata.package_version,
+        true,
+    );
 
     indent(&mut out, 1);
     out.push_str("\"toc\": ");
     out.push_str(&serialize_toc(&ir.toc));
     out.push_str(",\n");
+
+    indent(&mut out, 1);
+    out.push_str("\"spine\": [\n");
+    for (index, entry) in ir.spine.iter().enumerate() {
+        indent(&mut out, 2);
+        out.push('{');
+        push_inline_json_u32(&mut out, "spine_index", entry.spine_index, true);
+        push_inline_json_str(&mut out, "idref", &entry.idref, true);
+        push_inline_json_str_opt(&mut out, "href", entry.href.as_deref(), true);
+        push_inline_json_bool(&mut out, "linear", entry.linear, false);
+        out.push('}');
+        if index + 1 < ir.spine.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    indent(&mut out, 1);
+    out.push_str("],\n");
 
     indent(&mut out, 1);
     out.push_str("\"chapters\": [\n");
@@ -136,7 +184,8 @@ pub fn book_ir_to_json(ir: &BookIr) -> String {
         push_inline_json_str(&mut out, "title", &chapter.title, true);
         push_inline_json_u32(&mut out, "block_count", chapter.block_count, true);
         push_inline_json_str(&mut out, "visible_text", &chapter.visible_text, true);
-        push_inline_json_str(&mut out, "content_hash", &chapter.content_hash, false);
+        push_inline_json_str(&mut out, "content_hash", &chapter.content_hash, true);
+        push_inline_json_bool(&mut out, "is_noise", chapter.is_noise, false);
         out.push('}');
         if index + 1 < ir.chapters.len() {
             out.push(',');
@@ -156,9 +205,15 @@ pub fn book_ir_to_json(ir: &BookIr) -> String {
         push_inline_json_u32(&mut out, "order", block.order, true);
         push_inline_json_str(&mut out, "kind", &block.kind, true);
         push_inline_json_str(&mut out, "text", &block.text, true);
+        push_inline_json_str(&mut out, "text_fingerprint", &block.text_fingerprint, true);
         indent(&mut out, 2);
         out.push_str("\"source_ref\": {");
-        push_inline_json_str(&mut out, "chapter_href", &block.source_ref.chapter_href, true);
+        push_inline_json_str(
+            &mut out,
+            "chapter_href",
+            &block.source_ref.chapter_href,
+            true,
+        );
         push_inline_json_u32(&mut out, "spine_index", block.source_ref.spine_index, true);
         push_inline_json_u32(&mut out, "node_id", block.source_ref.node_id, true);
         push_inline_json_str_opt(&mut out, "cfi", block.source_ref.cfi.as_deref(), false);
@@ -179,10 +234,16 @@ fn serialize_toc(toc: &[TocEntry]) -> String {
     let mut out = String::from("[");
     for (index, entry) in toc.iter().enumerate() {
         out.push('{');
-        out.push_str(&format!("\"label\": \"{}\", ", escape_json_str(&entry.label)));
+        out.push_str(&format!(
+            "\"label\": \"{}\", ",
+            escape_json_str(&entry.label)
+        ));
         out.push_str(&format!("\"href\": \"{}\"", escape_json_str(&entry.href)));
         if !entry.children.is_empty() {
-            out.push_str(&format!(", \"children\": {}", serialize_toc(&entry.children)));
+            out.push_str(&format!(
+                ", \"children\": {}",
+                serialize_toc(&entry.children)
+            ));
         }
         out.push('}');
         if index + 1 < toc.len() {
@@ -206,7 +267,13 @@ fn push_json_str(out: &mut String, level: usize, name: &str, value: &str, traili
     out.push('\n');
 }
 
-fn push_json_str_opt(out: &mut String, level: usize, name: &str, value: Option<&str>, trailing: bool) {
+fn push_json_str_opt(
+    out: &mut String,
+    level: usize,
+    name: &str,
+    value: Option<&str>,
+    trailing: bool,
+) {
     indent(out, level);
     out.push('"');
     out.push_str(name);
@@ -240,6 +307,16 @@ fn push_inline_json_u32(out: &mut String, name: &str, value: u32, trailing: bool
     out.push_str(name);
     out.push_str("\": ");
     out.push_str(&value.to_string());
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_inline_json_bool(out: &mut String, name: &str, value: bool, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": ");
+    out.push_str(if value { "true" } else { "false" });
     if trailing {
         out.push_str(", ");
     }
@@ -300,6 +377,12 @@ mod tests {
                 href: Arc::from("ch1.xhtml"),
                 children: vec![],
             }],
+            spine: vec![SpineEntry {
+                spine_index: 0,
+                idref: Arc::from("chapter-1"),
+                href: Some(Arc::from("chapter-1.xhtml")),
+                linear: true,
+            }],
             chapters: vec![],
             blocks: vec![],
         };
@@ -307,5 +390,6 @@ mod tests {
         assert!(json.contains(r#""title": "Test""#));
         assert!(json.contains(r#""language": "en""#));
         assert!(json.contains(r#""label": "Chapter 1""#));
+        assert!(json.contains(r#""idref": "chapter-1""#));
     }
 }
