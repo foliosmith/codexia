@@ -356,10 +356,78 @@ mod tests {
             .map(|block| block.kind.as_str())
             .collect::<BTreeSet<_>>();
         assert!(kinds.contains("heading-1"));
+        assert!(kinds.contains("heading-2"));
         assert!(kinds.contains("paragraph"));
         assert!(kinds.contains("blockquote"));
         assert!(kinds.contains("list-item"));
         assert!(kinds.contains("footnote"));
+        assert!(kinds.contains("image-caption"));
+
+        let chapter_one_heading = first
+            .blocks
+            .iter()
+            .find(|block| block.text.as_ref() == "Chapter One")
+            .expect("chapter one heading");
+        assert_eq!(chapter_one_heading.heading_level, Some(1));
+        let deep_heading = first
+            .blocks
+            .iter()
+            .find(|block| block.text.as_ref() == "Deep Section")
+            .expect("deep heading");
+        assert_eq!(deep_heading.heading_level, Some(2));
+
+        let merged = first
+            .blocks
+            .iter()
+            .find(|block| {
+                block.text.as_ref() == "Broken paragraph boundary continues with lower-case text."
+            })
+            .expect("merged paragraph");
+        assert_eq!(merged.merged_from.len(), 2);
+        assert!(first
+            .blocks
+            .iter()
+            .all(|block| !block.text.trim().is_empty()));
+
+        let footnote = first
+            .blocks
+            .iter()
+            .find(|block| block.footnote_id.as_deref() == Some("note-1"))
+            .expect("footnote block");
+        assert_eq!(footnote.referenced_by.len(), 1);
+        let footnote_source = first
+            .blocks
+            .iter()
+            .find(|block| block.footnote_refs.contains(&footnote.block_id))
+            .expect("footnote source block");
+        assert_eq!(
+            footnote.referenced_by,
+            vec![footnote_source.block_id.clone()]
+        );
+
+        let caption = first
+            .blocks
+            .iter()
+            .find(|block| block.kind == "image-caption")
+            .expect("image caption");
+        assert_eq!(caption.text.as_ref(), "Figure caption.");
+        let image = caption.image.as_ref().expect("caption image metadata");
+        assert_eq!(image.src.as_ref(), "figure.jpg");
+        assert_eq!(image.resolved_path.as_deref(), Some("EPUB/figure.jpg"));
+        assert_eq!(image.alt.as_ref(), "Diagram alt");
+
+        for chapter in first.chapters.iter().filter(|chapter| !chapter.is_noise) {
+            let first_id = chapter.first_block_id.as_ref().expect("chapter start");
+            let last_id = chapter.last_block_id.as_ref().expect("chapter end");
+            assert!(first
+                .blocks
+                .iter()
+                .any(|block| block.block_id == *first_id && block.starts_chapter));
+            assert!(first
+                .blocks
+                .iter()
+                .any(|block| block.block_id == *last_id && block.ends_chapter));
+        }
 
         for chapter in &first.chapters {
             assert_eq!(chapter.content_hash.len(), 64);
@@ -396,6 +464,22 @@ mod tests {
         assert!(json.contains(r#""is_noise": true"#));
         assert!(json.contains(r#""kind": "blockquote""#));
         assert!(json.contains(r#""cfi": "epubcfi("#));
+        assert!(json.contains(r#""heading_level": 2"#));
+        assert!(json.contains(r#""footnote_refs": ["#));
+        assert!(json.contains(r#""starts_chapter": true"#));
+
+        let compiled = normalizer::compile(&first, crate::ir::Profile::Standard, "source");
+        let blocks_jsonl = normalizer::blocks_jsonl(&first.blocks);
+        let structure_json = normalizer::structure_json(&compiled.structure);
+        assert_eq!(blocks_jsonl.lines().count(), first.blocks.len());
+        assert!(blocks_jsonl
+            .lines()
+            .all(|line| line.starts_with('{') && line.ends_with('}')));
+        assert!(blocks_jsonl.contains(r#""text_fingerprint": "#));
+        assert!(blocks_jsonl.contains(r#""image": {"src": "figure.jpg""#));
+        assert!(structure_json.contains(r#""toc": ["#));
+        assert!(structure_json.contains(r#""spine": ["#));
+        assert!(structure_json.contains(r#""first_block_id": "#));
     }
 
     #[test]
@@ -442,6 +526,7 @@ mod tests {
     <item id="contents" href="contents.xhtml" media-type="application/xhtml+xml"/>
     <item id="chapter-1" href="chapter-1.xhtml" media-type="application/xhtml+xml"/>
     <item id="chapter-2" href="chapter-2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="figure" href="figure.jpg" media-type="image/jpeg"/>
     <item id="advertisement" href="advertisement.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine>
@@ -462,6 +547,7 @@ mod tests {
         <li><a href="chapter-2.xhtml">Chapter Two</a></li>
       </ol></li>
     </ol></li>
+    <li><a href="chapter-1.xhtml">Part One</a></li>
   </ol></nav></body>
 </html>"#;
         let copyright = xhtml(
@@ -473,10 +559,14 @@ mod tests {
             "Chapter One",
             &format!(
                 r##"<p>Codexia Running Header</p>
-<h1>Chapter One</h1>
+<h2>Chapter One</h2>
 <p>{paragraph}</p>
+<p>Broken paragraph boundary</p>
+<p>continues with lower-case text.</p>
+<p>   </p>
 <blockquote><p>Quoted argument.</p></blockquote>
 <ul><li><p>First list item.</p></li></ul>
+<figure><img src="figure.jpg" alt="Diagram alt" title="Diagram title"/><figcaption>Figure caption.</figcaption></figure>
 <p>See <a epub:type="noteref" href="#note-1">note</a>.</p>
 <aside epub:type="footnote" id="note-1"><p>Footnote detail.</p></aside>
 <p>Codexia Running Footer</p>"##
@@ -484,7 +574,7 @@ mod tests {
         );
         let chapter_two = xhtml(
             "Chapter Two",
-            "<p>Codexia Running Header</p><h1>Chapter Two</h1><p>Second chapter.</p><p>Codexia Running Footer</p>",
+            "<p>Codexia Running Header</p><h2>Chapter Two</h2><h4>Deep Section</h4><p>Second chapter.</p><p>Codexia Running Footer</p>",
         );
         let advertisement = xhtml("Advertisement", "<p>Buy the sequel today.</p>");
 
@@ -520,6 +610,10 @@ mod tests {
             TestEntry {
                 path: "EPUB/chapter-2.xhtml",
                 bytes: chapter_two.into_bytes(),
+            },
+            TestEntry {
+                path: "EPUB/figure.jpg",
+                bytes: vec![0xff, 0xd8, 0xff, 0xd9],
             },
             TestEntry {
                 path: "EPUB/advertisement.xhtml",

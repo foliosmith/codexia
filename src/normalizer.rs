@@ -11,14 +11,14 @@ use std::{
 };
 
 use pagelet::{
-    core::NodeId,
-    document::{ChapterIr as PageletChapterIr, DocumentNode},
+    core::{make_stable_block_id, BlockFingerprint, NodeId},
+    document::{ChapterIr as PageletChapterIr, DocumentNode, ImageNode, LinkKind},
     epub::is_likely_noise_chapter,
 };
 
 use crate::ir::{
-    Block, BookIr, Chapter, ChapterSummary, CompiledOutput, Manifest, Metadata, Profile, SourceRef,
-    SpineEntry, Structure, TocEntry,
+    Block, BookIr, Chapter, ChapterSummary, CompiledOutput, ImageReference, Manifest, Metadata,
+    Profile, SourceRef, SpineEntry, Structure, TocEntry,
 };
 
 /// Normaliser configuration.
@@ -46,6 +46,7 @@ pub fn normalise(
     options: &NormaliserOptions,
 ) -> BookIr {
     let noise_indices = detect_noise_chapters(chapters, options.filter_noise);
+    let heading_levels = normalised_heading_levels(chapters, &noise_indices);
     let repeated_boundaries = if options.filter_noise {
         repeated_boundary_fingerprints(chapters, &noise_indices)
     } else {
@@ -67,65 +68,271 @@ pub fn normalise(
             blocks
                 .into_iter()
                 .filter(|block| {
+                    if block.text.trim().is_empty() {
+                        return false;
+                    }
                     let fingerprint = block_fingerprint(block);
                     !repeated_boundaries.contains(&fingerprint)
                         || !boundary_fingerprints.contains(&fingerprint)
                 })
                 .collect::<Vec<_>>()
         };
-        let block_count = retained_blocks.len() as u32;
-        let visible_text = retained_blocks
+
+        let node_metadata = semantic_block_metadata(chapter, &heading_levels);
+        let mut normalised_blocks = retained_blocks
+            .into_iter()
+            .map(|block| {
+                let text = normalise_inline_whitespace(&block.text);
+                let metadata = node_metadata.get(&block.node_id.get());
+                let original_block_id = block.block_id.clone();
+                let fingerprint = BlockFingerprint::from_text(&text);
+                let cfi = chapter
+                    .node_cfi(block.node_id, spine_index, None)
+                    .map(|cfi| cfi.to_cfi_string());
+                DraftBlock {
+                    block: Block {
+                        block_id: make_stable_block_id(&chapter.href, block.order, fingerprint),
+                        chapter_index: spine_index,
+                        order: block.order,
+                        kind: metadata
+                            .map(|value| value.kind.clone())
+                            .unwrap_or_else(|| block.kind.clone()),
+                        text_fingerprint: hex_encode(fingerprint.hash().as_bytes()),
+                        text: Arc::from(text),
+                        heading_level: metadata.and_then(|value| value.heading_level),
+                        merged_from: Vec::new(),
+                        footnote_id: metadata.and_then(|value| value.footnote_id.clone()),
+                        footnote_refs: Vec::new(),
+                        referenced_by: Vec::new(),
+                        image: metadata.and_then(|value| value.image.clone()),
+                        starts_chapter: false,
+                        ends_chapter: false,
+                        source_ref: SourceRef {
+                            chapter_href: chapter.href.clone(),
+                            spine_index,
+                            node_id: block.node_id.get(),
+                            cfi,
+                        },
+                    },
+                    node_ids: vec![block.node_id],
+                    source_block_ids: vec![original_block_id],
+                }
+            })
+            .collect::<Vec<_>>();
+
+        normalised_blocks = merge_paragraph_boundaries(normalised_blocks);
+        associate_footnotes(chapter, &mut normalised_blocks);
+        if let Some(first) = normalised_blocks.first_mut() {
+            first.block.starts_chapter = true;
+        }
+        if let Some(last) = normalised_blocks.last_mut() {
+            last.block.ends_chapter = true;
+        }
+
+        let first_block_id = normalised_blocks
+            .first()
+            .map(|draft| draft.block.block_id.clone());
+        let last_block_id = normalised_blocks
+            .last()
+            .map(|draft| draft.block.block_id.clone());
+        let visible_text = normalised_blocks
             .iter()
-            .map(|block| block.text.trim())
-            .filter(|text| !text.is_empty())
+            .map(|draft| draft.block.text.as_ref())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let semantic_kinds = semantic_block_kinds(chapter);
 
         ir_chapters.push(Chapter {
             spine_index,
             href: chapter.href.clone(),
-            title: chapter.title.clone(),
-            block_count,
+            title: Arc::from(normalise_inline_whitespace(&chapter.title)),
+            block_count: u32::try_from(normalised_blocks.len()).unwrap_or(u32::MAX),
             visible_text: Arc::from(visible_text),
             content_hash: hex_encode(chapter.content_hash.as_bytes()),
+            first_block_id,
+            last_block_id,
             is_noise,
         });
 
-        for block in retained_blocks {
-            let text_fingerprint = block_fingerprint(&block);
-            let cfi = chapter
-                .node_cfi(block.node_id, spine_index, None)
-                .map(|cfi| cfi.to_cfi_string());
-            let kind = semantic_kinds
-                .get(&block.node_id.get())
-                .copied()
-                .unwrap_or(block.kind.as_str())
-                .to_owned();
-            ir_blocks.push(Block {
-                block_id: block.block_id.clone(),
-                chapter_index: spine_index,
-                order: block.order,
-                kind,
-                text: Arc::from(block.text),
-                text_fingerprint,
-                source_ref: SourceRef {
-                    chapter_href: chapter.href.clone(),
-                    spine_index,
-                    node_id: block.node_id.get(),
-                    cfi,
-                },
-            });
+        for draft in normalised_blocks {
+            ir_blocks.push(draft.block);
         }
     }
 
     BookIr {
         metadata: metadata.clone(),
-        toc: toc.to_vec(),
+        toc: normalise_toc(toc),
         spine: spine.to_vec(),
         chapters: ir_chapters,
         blocks: ir_blocks,
     }
+}
+
+#[derive(Debug, Clone)]
+struct DraftBlock {
+    block: Block,
+    node_ids: Vec<NodeId>,
+    source_block_ids: Vec<String>,
+}
+
+fn merge_paragraph_boundaries(blocks: Vec<DraftBlock>) -> Vec<DraftBlock> {
+    let mut merged = Vec::<DraftBlock>::new();
+    for block in blocks {
+        if let Some(previous) = merged.last_mut() {
+            if paragraphs_form_one_block(&previous.block, &block.block) {
+                merge_paragraph_block(previous, block);
+                continue;
+            }
+        }
+        merged.push(block);
+    }
+    merged
+}
+
+fn paragraphs_form_one_block(previous: &Block, next: &Block) -> bool {
+    if previous.kind != "paragraph"
+        || next.kind != "paragraph"
+        || previous.text.chars().count() > 1_200
+    {
+        return false;
+    }
+
+    let previous = previous.text.trim();
+    let next = next.text.trim();
+    if previous.is_empty() || next.is_empty() {
+        return false;
+    }
+
+    let terminal = previous
+        .chars()
+        .next_back()
+        .is_some_and(is_hard_paragraph_terminal);
+    let next_starts_lowercase = next
+        .chars()
+        .find(|character| !character.is_whitespace())
+        .is_some_and(char::is_lowercase);
+    let soft_cjk_boundary = previous
+        .chars()
+        .next_back()
+        .is_some_and(|character| matches!(character, '，' | '、'));
+
+    !terminal && (next_starts_lowercase || soft_cjk_boundary)
+}
+
+fn is_hard_paragraph_terminal(character: char) -> bool {
+    matches!(
+        character,
+        '.' | '!' | '?' | ':' | ';' | '。' | '！' | '？' | '：' | '；'
+    )
+}
+
+fn merge_paragraph_block(previous: &mut DraftBlock, next: DraftBlock) {
+    let text = format!("{} {}", previous.block.text.trim(), next.block.text.trim());
+    let fingerprint = BlockFingerprint::from_text(&text);
+    previous.block.block_id = make_stable_block_id(
+        &previous.block.source_ref.chapter_href,
+        previous.block.order,
+        fingerprint,
+    );
+    previous.block.text = Arc::from(text);
+    previous.block.text_fingerprint = hex_encode(fingerprint.hash().as_bytes());
+    previous.node_ids.extend(next.node_ids);
+    previous.source_block_ids.extend(next.source_block_ids);
+    previous.block.merged_from = previous.source_block_ids.clone();
+}
+
+fn associate_footnotes(chapter: &PageletChapterIr, blocks: &mut [DraftBlock]) {
+    let mut node_to_block = BTreeMap::new();
+    let mut note_to_block = BTreeMap::<Arc<str>, usize>::new();
+
+    for (index, draft) in blocks.iter().enumerate() {
+        for node_id in &draft.node_ids {
+            node_to_block.insert(node_id.get(), index);
+        }
+        if let Some(note_id) = draft.block.footnote_id.clone() {
+            note_to_block.insert(note_id, index);
+        }
+    }
+
+    let associations = chapter
+        .links
+        .iter()
+        .filter(|link| link.kind == LinkKind::Footnote)
+        .filter_map(|link| {
+            let note_id = link.fragment.as_ref()?;
+            let source_index = *node_to_block.get(&link.source_node.get())?;
+            let note_index = *note_to_block.get(note_id)?;
+            Some((source_index, note_index))
+        })
+        .collect::<Vec<_>>();
+
+    for (source_index, note_index) in associations {
+        if source_index == note_index {
+            continue;
+        }
+        let source_id = blocks[source_index].block.block_id.clone();
+        let note_id = blocks[note_index].block.block_id.clone();
+        if !blocks[source_index].block.footnote_refs.contains(&note_id) {
+            blocks[source_index].block.footnote_refs.push(note_id);
+        }
+        if !blocks[note_index].block.referenced_by.contains(&source_id) {
+            blocks[note_index].block.referenced_by.push(source_id);
+        }
+    }
+}
+
+fn normalise_toc(toc: &[TocEntry]) -> Vec<TocEntry> {
+    let mut result = Vec::<TocEntry>::new();
+    for entry in toc {
+        let label = normalise_inline_whitespace(&entry.label);
+        let href = entry.href.trim();
+        if label.is_empty() || href.is_empty() {
+            continue;
+        }
+        let normalised = TocEntry {
+            label: Arc::from(label),
+            href: Arc::from(href),
+            children: normalise_toc(&entry.children),
+        };
+        if let Some(existing) = result.iter_mut().find(|candidate| {
+            candidate.label.eq_ignore_ascii_case(&normalised.label)
+                && candidate.href == normalised.href
+        }) {
+            let mut children = existing.children.clone();
+            children.extend(normalised.children);
+            existing.children = normalise_toc(&children);
+        } else {
+            result.push(normalised);
+        }
+    }
+    result
+}
+
+fn normalised_heading_levels(
+    chapters: &[PageletChapterIr],
+    noise_indices: &BTreeMap<usize, bool>,
+) -> BTreeMap<u8, u8> {
+    let mut authored = BTreeSet::new();
+    for (index, chapter) in chapters.iter().enumerate() {
+        if noise_indices.contains_key(&index) {
+            continue;
+        }
+        for (_, node) in chapter.nodes.iter_with_ids() {
+            if let DocumentNode::Heading(heading) = node {
+                authored.insert(heading.level.clamp(1, 6));
+            }
+        }
+    }
+    authored
+        .into_iter()
+        .enumerate()
+        .map(|(index, authored_level)| {
+            (authored_level, u8::try_from(index + 1).unwrap_or(6).min(6))
+        })
+        .collect()
+}
+
+fn normalise_inline_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Build a compiled package from a BookIR.
@@ -135,17 +342,21 @@ pub fn compile(book_ir: &BookIr, profile: Profile, source_hash: &str) -> Compile
         .iter()
         .map(|ch| ChapterSummary {
             spine_index: ch.spine_index,
+            href: ch.href.clone(),
             title: ch.title.clone(),
             block_count: ch.block_count,
+            first_block_id: ch.first_block_id.clone(),
+            last_block_id: ch.last_block_id.clone(),
             is_noise: ch.is_noise,
         })
         .collect();
 
     let structure = Structure {
         title: book_ir.metadata.title.clone(),
-        spine_count: book_ir.chapters.len() as u32,
+        spine_count: u32::try_from(book_ir.spine.len()).unwrap_or(u32::MAX),
         chapter_count: chapter_summaries.len() as u32,
         toc: book_ir.toc.clone(),
+        spine: book_ir.spine.clone(),
         chapters: chapter_summaries,
     };
 
@@ -264,17 +475,37 @@ enum SemanticContext {
     BlockQuote,
 }
 
-fn semantic_block_kinds(chapter: &PageletChapterIr) -> BTreeMap<u32, &'static str> {
-    let mut kinds = BTreeMap::new();
-    collect_semantic_block_kinds(chapter, chapter.root, SemanticContext::Plain, &mut kinds);
-    kinds
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct NodeMetadata {
+    kind: String,
+    heading_level: Option<u8>,
+    footnote_id: Option<Arc<str>>,
+    image: Option<ImageReference>,
 }
 
-fn collect_semantic_block_kinds(
+fn semantic_block_metadata(
+    chapter: &PageletChapterIr,
+    heading_levels: &BTreeMap<u8, u8>,
+) -> BTreeMap<u32, NodeMetadata> {
+    let mut metadata = BTreeMap::new();
+    collect_semantic_block_metadata(
+        chapter,
+        chapter.root,
+        SemanticContext::Plain,
+        None,
+        heading_levels,
+        &mut metadata,
+    );
+    metadata
+}
+
+fn collect_semantic_block_metadata(
     chapter: &PageletChapterIr,
     node_id: NodeId,
     context: SemanticContext,
-    kinds: &mut BTreeMap<u32, &'static str>,
+    figure_image: Option<&ImageReference>,
+    heading_levels: &BTreeMap<u8, u8>,
+    metadata: &mut BTreeMap<u32, NodeMetadata>,
 ) {
     let Some(node) = chapter.nodes.get(node_id) else {
         return;
@@ -282,17 +513,48 @@ fn collect_semantic_block_kinds(
 
     match node {
         DocumentNode::Paragraph(_) => {
-            let kind = match context {
-                SemanticContext::Plain => "paragraph",
-                SemanticContext::List => "list",
-                SemanticContext::ListItem => "list-item",
-                SemanticContext::BlockQuote => "blockquote",
+            let kind = if figure_image.is_some() {
+                "image-caption"
+            } else {
+                match context {
+                    SemanticContext::Plain => "paragraph",
+                    SemanticContext::List => "list",
+                    SemanticContext::ListItem => "list-item",
+                    SemanticContext::BlockQuote => "blockquote",
+                }
             };
-            kinds.insert(node_id.get(), kind);
+            metadata.insert(
+                node_id.get(),
+                NodeMetadata {
+                    kind: kind.to_owned(),
+                    heading_level: None,
+                    footnote_id: None,
+                    image: figure_image.cloned(),
+                },
+            );
         }
-        DocumentNode::Heading(_) => {}
+        DocumentNode::Heading(heading) => {
+            let authored = heading.level.clamp(1, 6);
+            let level = heading_levels.get(&authored).copied().unwrap_or(1);
+            metadata.insert(
+                node_id.get(),
+                NodeMetadata {
+                    kind: format!("heading-{level}"),
+                    heading_level: Some(level),
+                    footnote_id: None,
+                    image: None,
+                },
+            );
+        }
         DocumentNode::List(_) => {
-            visit_semantic_children(chapter, node, SemanticContext::List, kinds);
+            visit_semantic_children(
+                chapter,
+                node,
+                SemanticContext::List,
+                figure_image,
+                heading_levels,
+                metadata,
+            );
         }
         DocumentNode::ListItem(_) => {
             let next_context = if context == SemanticContext::BlockQuote {
@@ -300,13 +562,55 @@ fn collect_semantic_block_kinds(
             } else {
                 SemanticContext::ListItem
             };
-            visit_semantic_children(chapter, node, next_context, kinds);
+            visit_semantic_children(
+                chapter,
+                node,
+                next_context,
+                figure_image,
+                heading_levels,
+                metadata,
+            );
         }
         DocumentNode::BlockQuote(_) => {
-            visit_semantic_children(chapter, node, SemanticContext::BlockQuote, kinds);
+            visit_semantic_children(
+                chapter,
+                node,
+                SemanticContext::BlockQuote,
+                figure_image,
+                heading_levels,
+                metadata,
+            );
         }
-        DocumentNode::Footnote(_) => {}
-        _ => visit_semantic_children(chapter, node, context, kinds),
+        DocumentNode::Figure(_) => {
+            let image = first_descendant_image(chapter, node_id).map(image_reference);
+            visit_semantic_children(
+                chapter,
+                node,
+                context,
+                image.as_ref(),
+                heading_levels,
+                metadata,
+            );
+        }
+        DocumentNode::Footnote(note) => {
+            metadata.insert(
+                node_id.get(),
+                NodeMetadata {
+                    kind: "footnote".to_owned(),
+                    heading_level: None,
+                    footnote_id: note.note_id.clone(),
+                    image: None,
+                },
+            );
+        }
+        _ => visit_semantic_children(
+            chapter,
+            node,
+            context,
+            figure_image,
+            heading_levels,
+            metadata,
+        ),
     }
 }
 
@@ -314,10 +618,38 @@ fn visit_semantic_children(
     chapter: &PageletChapterIr,
     node: &DocumentNode,
     context: SemanticContext,
-    kinds: &mut BTreeMap<u32, &'static str>,
+    figure_image: Option<&ImageReference>,
+    heading_levels: &BTreeMap<u8, u8>,
+    metadata: &mut BTreeMap<u32, NodeMetadata>,
 ) {
     for child in node.children() {
-        collect_semantic_block_kinds(chapter, *child, context, kinds);
+        collect_semantic_block_metadata(
+            chapter,
+            *child,
+            context,
+            figure_image,
+            heading_levels,
+            metadata,
+        );
+    }
+}
+
+fn first_descendant_image(chapter: &PageletChapterIr, node_id: NodeId) -> Option<&ImageNode> {
+    let node = chapter.nodes.get(node_id)?;
+    if let DocumentNode::Image(image) = node {
+        return Some(image);
+    }
+    node.children()
+        .iter()
+        .find_map(|child| first_descendant_image(chapter, *child))
+}
+
+fn image_reference(image: &ImageNode) -> ImageReference {
+    ImageReference {
+        src: image.src.clone(),
+        resolved_path: image.resolved_path.clone(),
+        alt: image.alt.clone(),
+        title: image.title.clone(),
     }
 }
 
@@ -327,24 +659,33 @@ pub fn blocks_jsonl(blocks: &[Block]) -> String {
     let mut out = String::new();
     for block in blocks {
         out.push('{');
-        out.push_str(&format!(
-            "\"block_id\": \"{}\", ",
-            escape_json_str(&block.block_id)
-        ));
-        out.push_str(&format!("\"chapter_index\": {}, ", block.chapter_index));
-        out.push_str(&format!("\"order\": {}, ", block.order));
-        out.push_str(&format!("\"kind\": \"{}\", ", escape_json_str(&block.kind)));
-        out.push_str(&format!("\"text\": \"{}\", ", escape_json_str(&block.text)));
-        out.push_str(&format!(
-            "\"source_ref\": {{\"chapter_href\": \"{}\", \"spine_index\": {}, \"node_id\": {}",
-            escape_json_str(&block.source_ref.chapter_href),
-            block.source_ref.spine_index,
-            block.source_ref.node_id,
-        ));
-        if let Some(cfi) = &block.source_ref.cfi {
-            out.push_str(&format!(", \"cfi\": \"{}\"", escape_json_str(cfi)));
-        }
-        out.push_str("}}");
+        push_inline_str(&mut out, "block_id", &block.block_id, true);
+        push_inline_u32(&mut out, "chapter_index", block.chapter_index, true);
+        push_inline_u32(&mut out, "order", block.order, true);
+        push_inline_str(&mut out, "kind", &block.kind, true);
+        push_inline_str(&mut out, "text", &block.text, true);
+        push_inline_str(&mut out, "text_fingerprint", &block.text_fingerprint, true);
+        push_inline_u8_opt(&mut out, "heading_level", block.heading_level, true);
+        push_inline_string_array(&mut out, "merged_from", &block.merged_from, true);
+        push_inline_str_opt(&mut out, "footnote_id", block.footnote_id.as_deref(), true);
+        push_inline_string_array(&mut out, "footnote_refs", &block.footnote_refs, true);
+        push_inline_string_array(&mut out, "referenced_by", &block.referenced_by, true);
+        out.push_str("\"image\": ");
+        push_image(&mut out, block.image.as_ref());
+        out.push_str(", ");
+        push_inline_bool(&mut out, "starts_chapter", block.starts_chapter, true);
+        push_inline_bool(&mut out, "ends_chapter", block.ends_chapter, true);
+        out.push_str("\"source_ref\": {");
+        push_inline_str(
+            &mut out,
+            "chapter_href",
+            &block.source_ref.chapter_href,
+            true,
+        );
+        push_inline_u32(&mut out, "spine_index", block.source_ref.spine_index, true);
+        push_inline_u32(&mut out, "node_id", block.source_ref.node_id, true);
+        push_inline_str_opt(&mut out, "cfi", block.source_ref.cfi.as_deref(), false);
+        out.push('}');
         out.push_str("}\n");
     }
     out
@@ -359,14 +700,43 @@ pub fn structure_json(structure: &Structure) -> String {
     push_field_u32(&mut out, 1, "spine_count", structure.spine_count, true);
     push_field_u32(&mut out, 1, "chapter_count", structure.chapter_count, true);
     indent(&mut out, 1);
+    out.push_str("\"toc\": ");
+    push_toc(&mut out, &structure.toc);
+    out.push_str(",\n");
+    indent(&mut out, 1);
+    out.push_str("\"spine\": [\n");
+    for (index, entry) in structure.spine.iter().enumerate() {
+        indent(&mut out, 2);
+        out.push('{');
+        push_inline_u32(&mut out, "spine_index", entry.spine_index, true);
+        push_inline_str(&mut out, "idref", &entry.idref, true);
+        push_inline_str_opt(&mut out, "href", entry.href.as_deref(), true);
+        push_inline_bool(&mut out, "linear", entry.linear, false);
+        out.push('}');
+        if index + 1 < structure.spine.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    indent(&mut out, 1);
+    out.push_str("],\n");
+    indent(&mut out, 1);
     out.push_str("\"chapters\": [\n");
     for (index, ch) in structure.chapters.iter().enumerate() {
         indent(&mut out, 2);
         out.push('{');
-        out.push_str(&format!("\"spine_index\": {}, ", ch.spine_index));
-        out.push_str(&format!("\"title\": \"{}\", ", escape_json_str(&ch.title)));
-        out.push_str(&format!("\"block_count\": {}, ", ch.block_count));
-        out.push_str(&format!("\"is_noise\": {}", ch.is_noise));
+        push_inline_u32(&mut out, "spine_index", ch.spine_index, true);
+        push_inline_str(&mut out, "href", &ch.href, true);
+        push_inline_str(&mut out, "title", &ch.title, true);
+        push_inline_u32(&mut out, "block_count", ch.block_count, true);
+        push_inline_str_opt(
+            &mut out,
+            "first_block_id",
+            ch.first_block_id.as_deref(),
+            true,
+        );
+        push_inline_str_opt(&mut out, "last_block_id", ch.last_block_id.as_deref(), true);
+        push_inline_bool(&mut out, "is_noise", ch.is_noise, false);
         out.push('}');
         if index + 1 < structure.chapters.len() {
             out.push(',');
@@ -401,6 +771,114 @@ pub fn manifest_json(manifest: &Manifest) -> String {
 }
 
 // -- helpers --
+
+fn push_inline_str(out: &mut String, name: &str, value: &str, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": \"");
+    out.push_str(&escape_json_str(value));
+    out.push('"');
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_inline_str_opt(out: &mut String, name: &str, value: Option<&str>, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": ");
+    if let Some(value) = value {
+        out.push('"');
+        out.push_str(&escape_json_str(value));
+        out.push('"');
+    } else {
+        out.push_str("null");
+    }
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_inline_u32(out: &mut String, name: &str, value: u32, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": ");
+    out.push_str(&value.to_string());
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_inline_u8_opt(out: &mut String, name: &str, value: Option<u8>, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": ");
+    if let Some(value) = value {
+        out.push_str(&value.to_string());
+    } else {
+        out.push_str("null");
+    }
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_inline_bool(out: &mut String, name: &str, value: bool, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": ");
+    out.push_str(if value { "true" } else { "false" });
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_inline_string_array(out: &mut String, name: &str, values: &[String], trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": [");
+    for (index, value) in values.iter().enumerate() {
+        out.push('"');
+        out.push_str(&escape_json_str(value));
+        out.push('"');
+        if index + 1 < values.len() {
+            out.push_str(", ");
+        }
+    }
+    out.push(']');
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_image(out: &mut String, image: Option<&ImageReference>) {
+    let Some(image) = image else {
+        out.push_str("null");
+        return;
+    };
+    out.push('{');
+    push_inline_str(out, "src", &image.src, true);
+    push_inline_str_opt(out, "resolved_path", image.resolved_path.as_deref(), true);
+    push_inline_str(out, "alt", &image.alt, true);
+    push_inline_str_opt(out, "title", image.title.as_deref(), false);
+    out.push('}');
+}
+
+fn push_toc(out: &mut String, toc: &[TocEntry]) {
+    out.push('[');
+    for (index, entry) in toc.iter().enumerate() {
+        out.push('{');
+        push_inline_str(out, "label", &entry.label, true);
+        push_inline_str(out, "href", &entry.href, true);
+        out.push_str("\"children\": ");
+        push_toc(out, &entry.children);
+        out.push('}');
+        if index + 1 < toc.len() {
+            out.push_str(", ");
+        }
+    }
+    out.push(']');
+}
 
 fn profile_name(profile: Profile) -> &'static str {
     match profile {

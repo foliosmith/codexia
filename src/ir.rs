@@ -53,6 +53,8 @@ pub struct Chapter {
     pub block_count: u32,
     pub visible_text: Arc<str>,
     pub content_hash: String,
+    pub first_block_id: Option<String>,
+    pub last_block_id: Option<String>,
     pub is_noise: bool,
 }
 
@@ -65,7 +67,24 @@ pub struct Block {
     pub kind: String,
     pub text: Arc<str>,
     pub text_fingerprint: String,
+    pub heading_level: Option<u8>,
+    pub merged_from: Vec<String>,
+    pub footnote_id: Option<Arc<str>>,
+    pub footnote_refs: Vec<String>,
+    pub referenced_by: Vec<String>,
+    pub image: Option<ImageReference>,
+    pub starts_chapter: bool,
+    pub ends_chapter: bool,
     pub source_ref: SourceRef,
+}
+
+/// Image metadata attached to a normalized caption block.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ImageReference {
+    pub src: Arc<str>,
+    pub resolved_path: Option<Arc<str>>,
+    pub alt: Arc<str>,
+    pub title: Option<Arc<str>>,
 }
 
 /// A stable reference back to the EPUB source.
@@ -100,6 +119,7 @@ pub struct Structure {
     pub spine_count: u32,
     pub chapter_count: u32,
     pub toc: Vec<TocEntry>,
+    pub spine: Vec<SpineEntry>,
     pub chapters: Vec<ChapterSummary>,
 }
 
@@ -107,8 +127,11 @@ pub struct Structure {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ChapterSummary {
     pub spine_index: u32,
+    pub href: Arc<str>,
     pub title: Arc<str>,
     pub block_count: u32,
+    pub first_block_id: Option<String>,
+    pub last_block_id: Option<String>,
     pub is_noise: bool,
 }
 
@@ -185,6 +208,18 @@ pub fn book_ir_to_json(ir: &BookIr) -> String {
         push_inline_json_u32(&mut out, "block_count", chapter.block_count, true);
         push_inline_json_str(&mut out, "visible_text", &chapter.visible_text, true);
         push_inline_json_str(&mut out, "content_hash", &chapter.content_hash, true);
+        push_inline_json_str_opt(
+            &mut out,
+            "first_block_id",
+            chapter.first_block_id.as_deref(),
+            true,
+        );
+        push_inline_json_str_opt(
+            &mut out,
+            "last_block_id",
+            chapter.last_block_id.as_deref(),
+            true,
+        );
         push_inline_json_bool(&mut out, "is_noise", chapter.is_noise, false);
         out.push('}');
         if index + 1 < ir.chapters.len() {
@@ -206,6 +241,16 @@ pub fn book_ir_to_json(ir: &BookIr) -> String {
         push_inline_json_str(&mut out, "kind", &block.kind, true);
         push_inline_json_str(&mut out, "text", &block.text, true);
         push_inline_json_str(&mut out, "text_fingerprint", &block.text_fingerprint, true);
+        push_inline_json_u8_opt(&mut out, "heading_level", block.heading_level, true);
+        push_inline_json_string_array(&mut out, "merged_from", &block.merged_from, true);
+        push_inline_json_str_opt(&mut out, "footnote_id", block.footnote_id.as_deref(), true);
+        push_inline_json_string_array(&mut out, "footnote_refs", &block.footnote_refs, true);
+        push_inline_json_string_array(&mut out, "referenced_by", &block.referenced_by, true);
+        out.push_str("\"image\": ");
+        push_image_reference(&mut out, block.image.as_ref());
+        out.push_str(", ");
+        push_inline_json_bool(&mut out, "starts_chapter", block.starts_chapter, true);
+        push_inline_json_bool(&mut out, "ends_chapter", block.ends_chapter, true);
         indent(&mut out, 2);
         out.push_str("\"source_ref\": {");
         push_inline_json_str(
@@ -312,6 +357,20 @@ fn push_inline_json_u32(out: &mut String, name: &str, value: u32, trailing: bool
     }
 }
 
+fn push_inline_json_u8_opt(out: &mut String, name: &str, value: Option<u8>, trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": ");
+    if let Some(value) = value {
+        out.push_str(&value.to_string());
+    } else {
+        out.push_str("null");
+    }
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
 fn push_inline_json_bool(out: &mut String, name: &str, value: bool, trailing: bool) {
     out.push('"');
     out.push_str(name);
@@ -320,6 +379,37 @@ fn push_inline_json_bool(out: &mut String, name: &str, value: bool, trailing: bo
     if trailing {
         out.push_str(", ");
     }
+}
+
+fn push_inline_json_string_array(out: &mut String, name: &str, values: &[String], trailing: bool) {
+    out.push('"');
+    out.push_str(name);
+    out.push_str("\": [");
+    for (index, value) in values.iter().enumerate() {
+        out.push('"');
+        out.push_str(&escape_json_str(value));
+        out.push('"');
+        if index + 1 < values.len() {
+            out.push_str(", ");
+        }
+    }
+    out.push(']');
+    if trailing {
+        out.push_str(", ");
+    }
+}
+
+fn push_image_reference(out: &mut String, image: Option<&ImageReference>) {
+    let Some(image) = image else {
+        out.push_str("null");
+        return;
+    };
+    out.push('{');
+    push_inline_json_str(out, "src", &image.src, true);
+    push_inline_json_str_opt(out, "resolved_path", image.resolved_path.as_deref(), true);
+    push_inline_json_str(out, "alt", &image.alt, true);
+    push_inline_json_str_opt(out, "title", image.title.as_deref(), false);
+    out.push('}');
 }
 
 fn push_inline_json_str_opt(out: &mut String, name: &str, value: Option<&str>, trailing: bool) {
