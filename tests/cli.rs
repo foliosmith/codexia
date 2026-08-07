@@ -1,0 +1,275 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde_json::Value;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn parse_writes_book_ir_to_file_and_stdout() {
+    let workspace = TempWorkspace::new("parse");
+    let epub = workspace.path.join("fixture.epub");
+    let output_path = workspace.path.join("book_ir.json");
+    fs::write(&epub, minimal_epub()).expect("write EPUB fixture");
+
+    let file_output = codexia(&[
+        "parse",
+        path_text(&epub),
+        "--output",
+        path_text(&output_path),
+    ]);
+    assert_success(&file_output);
+    assert!(stderr(&file_output).contains("BookIR written"));
+
+    let book_ir: Value = serde_json::from_slice(&fs::read(&output_path).expect("read BookIR"))
+        .expect("parse BookIR JSON");
+    assert_eq!(book_ir["title"], "CLI Fixture");
+    assert_eq!(book_ir["chapters"].as_array().map(Vec::len), Some(1));
+    assert!(book_ir["blocks"]
+        .as_array()
+        .is_some_and(|blocks| !blocks.is_empty()));
+
+    let stdout_output = codexia(&["parse", path_text(&epub)]);
+    assert_success(&stdout_output);
+    let stdout_book: Value =
+        serde_json::from_slice(&stdout_output.stdout).expect("parse stdout BookIR");
+    assert_eq!(stdout_book, book_ir);
+}
+
+#[test]
+fn compile_builds_a_package_that_validate_checks_semantically() {
+    let workspace = TempWorkspace::new("compile");
+    let epub = workspace.path.join("fixture.epub");
+    let package = workspace.path.join("package");
+    fs::write(&epub, minimal_epub()).expect("write EPUB fixture");
+
+    let compile_output = codexia(&[
+        "compile",
+        path_text(&epub),
+        "--profile",
+        "standard",
+        "--out",
+        path_text(&package),
+    ]);
+    assert_success(&compile_output);
+    for name in [
+        "manifest.json",
+        "structure.json",
+        "book_ir.json",
+        "blocks.jsonl",
+    ] {
+        assert!(package.join(name).is_file(), "missing {name}");
+    }
+
+    let validate_output = codexia(&["validate", path_text(&package)]);
+    assert_success(&validate_output);
+    assert!(stderr(&validate_output).contains("is valid"));
+
+    let manifest_path = package.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+            .expect("parse manifest");
+    manifest["block_count"] = Value::from(999_u64);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize corrupt manifest"),
+    )
+    .expect("write corrupt manifest");
+
+    let corrupt_output = codexia(&["validate", path_text(&package)]);
+    assert!(!corrupt_output.status.success());
+    assert!(stderr(&corrupt_output).contains("count mismatch"));
+}
+
+#[test]
+fn cli_rejects_ambiguous_or_incomplete_arguments() {
+    let workspace = TempWorkspace::new("arguments");
+    let epub = workspace.path.join("fixture.epub");
+    fs::write(&epub, minimal_epub()).expect("write EPUB fixture");
+
+    let duplicate_profile = codexia(&[
+        "compile",
+        path_text(&epub),
+        "--profile",
+        "standard",
+        "--profile",
+        "deep",
+        "--out",
+        path_text(&workspace.path.join("package")),
+    ]);
+    assert!(!duplicate_profile.status.success());
+    assert!(stderr(&duplicate_profile).contains("--profile may only be specified once"));
+
+    let missing_output = codexia(&["parse", path_text(&epub), "--output", "--invalid"]);
+    assert!(!missing_output.status.success());
+    assert!(stderr(&missing_output).contains("--output requires a value"));
+
+    let extra_validate = codexia(&["validate", "one", "two"]);
+    assert!(!extra_validate.status.success());
+    assert!(stderr(&extra_validate).contains("exactly one package directory"));
+}
+
+fn codexia(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_codexia"))
+        .args(args)
+        .output()
+        .expect("run codexia")
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr(output)
+    );
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn path_text(path: &Path) -> &str {
+    path.to_str().expect("UTF-8 test path")
+}
+
+struct TempWorkspace {
+    path: PathBuf,
+}
+
+impl TempWorkspace {
+    fn new(label: &str) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "codexia-cli-{label}-{}-{timestamp}-{counter}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create test workspace");
+        Self { path }
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct ZipEntry<'a> {
+    path: &'a str,
+    bytes: &'a [u8],
+}
+
+fn minimal_epub() -> Vec<u8> {
+    let container = br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+    let package = br#"<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="bookid">urn:codexia:cli</dc:identifier><dc:title>CLI Fixture</dc:title><dc:language>en</dc:language></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#;
+    let chapter = br#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter One</title></head><body><h1>Chapter One</h1><p>A deterministic CLI fixture paragraph.</p></body></html>"#;
+    write_stored_zip(&[
+        ZipEntry {
+            path: "mimetype",
+            bytes: b"application/epub+zip",
+        },
+        ZipEntry {
+            path: "META-INF/container.xml",
+            bytes: container,
+        },
+        ZipEntry {
+            path: "EPUB/package.opf",
+            bytes: package,
+        },
+        ZipEntry {
+            path: "EPUB/chapter.xhtml",
+            bytes: chapter,
+        },
+    ])
+}
+
+fn write_stored_zip(entries: &[ZipEntry<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+
+    for entry in entries {
+        let offset = u32::try_from(out.len()).expect("fixture offset");
+        let name = entry.path.as_bytes();
+        let size = u32::try_from(entry.bytes.len()).expect("fixture size");
+        let crc = crc32(entry.bytes);
+
+        write_u32(&mut out, 0x0403_4b50);
+        write_u16(&mut out, 20);
+        write_u16(&mut out, 0);
+        write_u16(&mut out, 0);
+        write_u16(&mut out, 0);
+        write_u16(&mut out, 0);
+        write_u32(&mut out, crc);
+        write_u32(&mut out, size);
+        write_u32(&mut out, size);
+        write_u16(&mut out, u16::try_from(name.len()).expect("fixture name"));
+        write_u16(&mut out, 0);
+        out.extend_from_slice(name);
+        out.extend_from_slice(entry.bytes);
+
+        write_u32(&mut central, 0x0201_4b50);
+        write_u16(&mut central, 20);
+        write_u16(&mut central, 20);
+        write_u16(&mut central, 0);
+        write_u16(&mut central, 0);
+        write_u16(&mut central, 0);
+        write_u16(&mut central, 0);
+        write_u32(&mut central, crc);
+        write_u32(&mut central, size);
+        write_u32(&mut central, size);
+        write_u16(
+            &mut central,
+            u16::try_from(name.len()).expect("fixture name"),
+        );
+        write_u16(&mut central, 0);
+        write_u16(&mut central, 0);
+        write_u16(&mut central, 0);
+        write_u16(&mut central, 0);
+        write_u32(&mut central, 0);
+        write_u32(&mut central, offset);
+        central.extend_from_slice(name);
+    }
+
+    let central_offset = u32::try_from(out.len()).expect("central offset");
+    let central_size = u32::try_from(central.len()).expect("central size");
+    out.extend_from_slice(&central);
+    write_u32(&mut out, 0x0605_4b50);
+    write_u16(&mut out, 0);
+    write_u16(&mut out, 0);
+    write_u16(&mut out, u16::try_from(entries.len()).expect("entry count"));
+    write_u16(&mut out, u16::try_from(entries.len()).expect("entry count"));
+    write_u32(&mut out, central_size);
+    write_u32(&mut out, central_offset);
+    write_u16(&mut out, 0);
+    out
+}
+
+fn write_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffff_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}

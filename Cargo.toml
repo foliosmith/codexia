@@ -6,3 +6,4 @@ description = "Book Agent — compile EPUB into structured Book Intelligence Pac
 
 [dependencies]
 pagelet = { path = "../pagelet/crates/pagelet" }
+serde_json = "1.0"
