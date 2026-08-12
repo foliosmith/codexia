@@ -2,7 +2,8 @@
 //!
 //! Usage:
 //!   codexia parse <input.epub> [--output <file>]           Parse EPUB → BookIR
-//!   codexia compile <input.epub> --out <dir>                Compile full Book Package
+//!   codexia compile <input.epub> --out <dir>                Compile Book Package
+//!     [--analyzer-command <executable>] [--analysis-jobs <count>]
 //!   codexia validate <dir>                                  Validate a compiled package
 //!   codexia help                                            Show help
 
@@ -15,6 +16,7 @@ use std::{
     process::ExitCode,
 };
 
+use codexia::chapter_analysis::{self, AnalysisOptions, CommandChapterAnalyzer};
 use codexia::epub_parser;
 use codexia::ir;
 use codexia::ir::Profile;
@@ -93,6 +95,8 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     let mut out_dir = None;
     let mut profile = "standard".to_owned();
     let mut profile_set = false;
+    let mut analyzer_command = None;
+    let mut analysis_jobs = None;
     let mut path = None;
 
     let mut index = 0;
@@ -114,6 +118,27 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
                 profile = value.to_owned();
                 profile_set = true;
             }
+            "--analyzer-command" => {
+                index += 1;
+                let value = option_value(args, index, "--analyzer-command")?;
+                if analyzer_command.replace(value.to_owned()).is_some() {
+                    return Err("--analyzer-command may only be specified once".to_owned());
+                }
+            }
+            "--analysis-jobs" => {
+                index += 1;
+                let value = option_value(args, index, "--analysis-jobs")?;
+                if analysis_jobs.is_some() {
+                    return Err("--analysis-jobs may only be specified once".to_owned());
+                }
+                let jobs = value
+                    .parse::<usize>()
+                    .map_err(|_| "--analysis-jobs must be a positive integer".to_owned())?;
+                if jobs == 0 {
+                    return Err("--analysis-jobs must be a positive integer".to_owned());
+                }
+                analysis_jobs = Some(jobs);
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown compile option: {value}"));
             }
@@ -134,6 +159,9 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
         "deep" => Profile::Deep,
         other => return Err(format!("unknown profile: {other}")),
     };
+    if analyzer_command.is_none() && analysis_jobs.is_some() {
+        return Err("--analysis-jobs requires --analyzer-command".to_owned());
+    }
 
     let bytes = fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let source_hash = hex_encode(pagelet::core::ContentHash::from_bytes(&bytes).as_bytes());
@@ -158,9 +186,27 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     fs::write(out.join("manifest.json"), &manifest_json)
         .map_err(|e| format!("cannot write manifest.json: {e}"))?;
 
-    let file_count = 4;
+    let analysis_count = if let Some(command) = analyzer_command {
+        let analyzer = CommandChapterAnalyzer::new(command);
+        let analyses = chapter_analysis::analyze_book(
+            &book_ir,
+            &analyzer,
+            AnalysisOptions {
+                max_parallelism: analysis_jobs
+                    .unwrap_or_else(|| AnalysisOptions::default().max_parallelism),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        chapter_analysis::write_chapter_analyses(&out, &analyses)
+            .map_err(|error| error.to_string())?;
+        analyses.len()
+    } else {
+        0
+    };
+
+    let file_count = 4 + analysis_count;
     eprintln!(
-        "Compiled {path} -> {out_dir}/ ({file_count} files, {} blocks, {} chapters, profile: {})",
+        "Compiled {path} -> {out_dir}/ ({file_count} files, {} blocks, {} chapters, {analysis_count} analyses, profile: {})",
         book_ir.blocks.len(),
         book_ir.chapters.len(),
         match profile {
@@ -532,6 +578,7 @@ fn print_help() {
     println!("Usage:");
     println!("  codexia parse <input.epub> [--output <file>]");
     println!("  codexia compile <input.epub> --out <dir> [--profile basic|standard|deep]");
+    println!("    [--analyzer-command <executable>] [--analysis-jobs <count>]");
     println!("  codexia validate <dir>");
 }
 

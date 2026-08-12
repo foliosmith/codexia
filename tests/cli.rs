@@ -6,6 +6,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::Value;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -87,6 +90,64 @@ fn compile_builds_a_package_that_validate_checks_semantically() {
 }
 
 #[test]
+#[cfg(unix)]
+fn compile_runs_chapter_analyzer_and_writes_analysis_documents() {
+    let workspace = TempWorkspace::new("chapter-analysis");
+    let epub = workspace.path.join("fixture.epub");
+    let package = workspace.path.join("package");
+    let request_capture = workspace.path.join("request.json");
+    let analyzer = workspace.path.join("analyzer.sh");
+    fs::write(&epub, minimal_epub()).expect("write EPUB fixture");
+    fs::write(
+        &analyzer,
+        format!(
+            r#"#!/bin/sh
+tee '{}' >/dev/null
+printf '%s' '{{"summary":{{"one_sentence":"One sentence.","short":"Short summary.","deep":"Deep summary.","role_in_book":"Introduces the fixture."}},"key_ideas":["Determinism"],"concepts":[],"claims":[],"argument_flow":[],"difficult_passages":[],"entities":[]}}'
+"#,
+            request_capture.display()
+        ),
+    )
+    .expect("write analyzer fixture");
+    let mut permissions = fs::metadata(&analyzer)
+        .expect("analyzer metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&analyzer, permissions).expect("make analyzer executable");
+
+    let output = codexia(&[
+        "compile",
+        path_text(&epub),
+        "--out",
+        path_text(&package),
+        "--analyzer-command",
+        path_text(&analyzer),
+        "--analysis-jobs",
+        "1",
+    ]);
+    assert_success(&output);
+    assert!(stderr(&output).contains("1 analyses"));
+
+    let request: Value =
+        serde_json::from_slice(&fs::read(&request_capture).expect("read analyzer request"))
+            .expect("parse analyzer request");
+    assert_eq!(request["task"], "chapter_analysis");
+    assert_eq!(request["prompt_tasks"].as_array().map(Vec::len), Some(5));
+    assert_eq!(request["context"]["chapter"]["chapter_id"], "chapter_001");
+    assert!(request["context"]["chapter"]["blocks"]
+        .as_array()
+        .is_some_and(|blocks| !blocks.is_empty()));
+
+    let analysis_path = package.join("chapters/chapter_001.analysis.json");
+    let analysis: Value =
+        serde_json::from_slice(&fs::read(&analysis_path).expect("read chapter analysis"))
+            .expect("parse chapter analysis");
+    assert_eq!(analysis["schema_version"], "0.1");
+    assert_eq!(analysis["chapter_id"], "chapter_001");
+    assert_eq!(analysis["summary"]["one_sentence"], "One sentence.");
+}
+
+#[test]
 fn cli_rejects_ambiguous_or_incomplete_arguments() {
     let workspace = TempWorkspace::new("arguments");
     let epub = workspace.path.join("fixture.epub");
@@ -112,6 +173,17 @@ fn cli_rejects_ambiguous_or_incomplete_arguments() {
     let extra_validate = codexia(&["validate", "one", "two"]);
     assert!(!extra_validate.status.success());
     assert!(stderr(&extra_validate).contains("exactly one package directory"));
+
+    let jobs_without_analyzer = codexia(&[
+        "compile",
+        path_text(&epub),
+        "--out",
+        path_text(&workspace.path.join("package")),
+        "--analysis-jobs",
+        "2",
+    ]);
+    assert!(!jobs_without_analyzer.status.success());
+    assert!(stderr(&jobs_without_analyzer).contains("requires --analyzer-command"));
 }
 
 fn codexia(args: &[&str]) -> Output {
