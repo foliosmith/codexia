@@ -17,9 +17,9 @@ use std::{
     thread,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::ir::{Block, BookIr, Chapter, TocEntry};
+use crate::ir::{Block, BookIr, Chapter, Profile, TocEntry};
 
 /// Version of the persisted chapter-analysis document and provider protocol.
 pub const CHAPTER_ANALYSIS_VERSION: &str = "0.1";
@@ -64,6 +64,8 @@ pub struct PromptTask {
 pub struct ChapterAnalysisRequest {
     pub protocol_version: &'static str,
     pub task: &'static str,
+    pub analysis_profile: &'static str,
+    pub profile_instruction: &'static str,
     pub system_prompt: &'static str,
     pub prompt_tasks: &'static [PromptTask],
     pub context: ChapterAnalysisContext,
@@ -235,6 +237,7 @@ pub struct AnalysisSourceRef {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChapterAnalysis {
     pub schema_version: String,
+    pub analysis_profile: String,
     pub chapter_id: String,
     pub spine_index: u32,
     pub chapter_title: String,
@@ -251,27 +254,28 @@ pub trait ChapterAnalyzer: Sync {
     ) -> Result<GeneratedChapterAnalysis, AnalysisError>;
 }
 
-/// Adapter for an executable that reads one request JSON from stdin and writes
-/// one `GeneratedChapterAnalysis` JSON object to stdout.
+/// Adapter for an executable that exchanges one JSON request and response over
+/// stdin/stdout. The request's `task` field selects the analysis operation.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct CommandChapterAnalyzer {
+pub struct CommandAnalyzer {
     executable: PathBuf,
 }
 
-impl CommandChapterAnalyzer {
+/// Backwards-compatible name for the chapter-analysis adapter.
+pub type CommandChapterAnalyzer = CommandAnalyzer;
+
+impl CommandAnalyzer {
     #[must_use]
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
         }
     }
-}
 
-impl ChapterAnalyzer for CommandChapterAnalyzer {
-    fn analyze(
+    pub(crate) fn execute<Request: Serialize, Response: DeserializeOwned>(
         &self,
-        request: &ChapterAnalysisRequest,
-    ) -> Result<GeneratedChapterAnalysis, AnalysisError> {
+        request: &Request,
+    ) -> Result<Response, AnalysisError> {
         let mut child = Command::new(&self.executable)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -313,10 +317,22 @@ impl ChapterAnalyzer for CommandChapterAnalyzer {
     }
 }
 
+impl ChapterAnalyzer for CommandAnalyzer {
+    fn analyze(
+        &self,
+        request: &ChapterAnalysisRequest,
+    ) -> Result<GeneratedChapterAnalysis, AnalysisError> {
+        self.execute(request)
+    }
+}
+
 /// Parallel execution settings for a chapter-analysis run.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct AnalysisOptions {
     pub max_parallelism: usize,
+    pub profile: Profile,
+    /// One-based chapter number through which analysis is allowed.
+    pub analyze_through: Option<u32>,
 }
 
 impl Default for AnalysisOptions {
@@ -324,6 +340,8 @@ impl Default for AnalysisOptions {
         let available = thread::available_parallelism().map_or(1, usize::from);
         Self {
             max_parallelism: available.min(4),
+            profile: Profile::Standard,
+            analyze_through: None,
         }
     }
 }
@@ -343,8 +361,14 @@ pub fn analyze_book<A: ChapterAnalyzer>(
     let requests = book
         .chapters
         .iter()
-        .filter(|chapter| !chapter.is_noise && chapter.block_count > 0)
-        .map(|chapter| build_request(book, chapter))
+        .filter(|chapter| {
+            !chapter.is_noise
+                && chapter.block_count > 0
+                && options
+                    .analyze_through
+                    .is_none_or(|limit| chapter.spine_index < limit)
+        })
+        .map(|chapter| build_request(book, chapter, options.profile))
         .collect::<Result<Vec<_>, _>>()?;
     if requests.is_empty() {
         return Ok(Vec::new());
@@ -422,6 +446,7 @@ pub fn write_chapter_analyses(
 fn build_request(
     book: &BookIr,
     chapter: &Chapter,
+    profile: Profile,
 ) -> Result<ChapterAnalysisRequest, AnalysisError> {
     let chapter_position = book
         .chapters
@@ -456,6 +481,8 @@ fn build_request(
     Ok(ChapterAnalysisRequest {
         protocol_version: CHAPTER_ANALYSIS_VERSION,
         task: "chapter_analysis",
+        analysis_profile: profile_name(profile),
+        profile_instruction: profile_instruction(profile),
         system_prompt: CHAPTER_ANALYSIS_SYSTEM_PROMPT,
         prompt_tasks: PROMPT_TASKS,
         context: ChapterAnalysisContext {
@@ -482,6 +509,7 @@ fn complete_analysis(
     let chapter = &request.context.chapter;
     Ok(ChapterAnalysis {
         schema_version: CHAPTER_ANALYSIS_VERSION.to_owned(),
+        analysis_profile: request.analysis_profile.to_owned(),
         chapter_id: chapter.chapter_id.clone(),
         spine_index: chapter.spine_index,
         chapter_title: chapter.title.clone(),
@@ -523,6 +551,28 @@ fn toc_context(entry: &TocEntry) -> TocContext {
 
 fn chapter_id(spine_index: u32) -> String {
     format!("chapter_{:03}", spine_index.saturating_add(1))
+}
+
+pub const fn profile_name(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Basic => "basic",
+        Profile::Standard => "standard",
+        Profile::Deep => "deep",
+    }
+}
+
+pub const fn profile_instruction(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Basic => {
+            "Be concise: extract only the chapter's essential summary, ideas, and evidence."
+        }
+        Profile::Standard => {
+            "Balance coverage and cost: include the important concepts, claims, entities, and difficult passages."
+        }
+        Profile::Deep => {
+            "Be comprehensive: preserve nuanced arguments, counterpoints, relations, and difficult passages."
+        }
+    }
 }
 
 fn condense(text: &str, max_chars: usize) -> String {
@@ -598,7 +648,10 @@ mod tests {
         let analyses = analyze_book(
             &book,
             analyzer.as_ref(),
-            AnalysisOptions { max_parallelism: 2 },
+            AnalysisOptions {
+                max_parallelism: 2,
+                ..AnalysisOptions::default()
+            },
         )
         .expect("analyze book");
 
@@ -645,7 +698,10 @@ mod tests {
         let error = analyze_book(
             &book,
             &InvalidAnalyzer,
-            AnalysisOptions { max_parallelism: 1 },
+            AnalysisOptions {
+                max_parallelism: 1,
+                ..AnalysisOptions::default()
+            },
         )
         .expect_err("invalid output");
         assert!(error.to_string().contains("summary.deep must not be empty"));
@@ -653,12 +709,37 @@ mod tests {
             analyze_book(
                 &book,
                 &InvalidAnalyzer,
-                AnalysisOptions { max_parallelism: 0 },
+                AnalysisOptions {
+                    max_parallelism: 0,
+                    ..AnalysisOptions::default()
+                },
             )
             .expect_err("zero workers")
             .to_string(),
             "max_parallelism must be at least 1"
         );
+
+        struct ValidAnalyzer;
+        impl ChapterAnalyzer for ValidAnalyzer {
+            fn analyze(
+                &self,
+                request: &ChapterAnalysisRequest,
+            ) -> Result<GeneratedChapterAnalysis, AnalysisError> {
+                Ok(generated_fixture(&request.context.chapter.chapter_id))
+            }
+        }
+        let partial = analyze_book(
+            &book,
+            &ValidAnalyzer,
+            AnalysisOptions {
+                max_parallelism: 1,
+                analyze_through: Some(1),
+                ..AnalysisOptions::default()
+            },
+        )
+        .expect("lazy analysis");
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].chapter_id, "chapter_001");
     }
 
     fn generated_fixture(chapter_id: &str) -> GeneratedChapterAnalysis {

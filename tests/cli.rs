@@ -91,24 +91,27 @@ fn compile_builds_a_package_that_validate_checks_semantically() {
 
 #[test]
 #[cfg(unix)]
-fn compile_runs_chapter_analyzer_and_writes_analysis_documents() {
+fn compile_runs_the_full_book_analysis_pipeline_and_reuses_its_cache() {
     let workspace = TempWorkspace::new("chapter-analysis");
     let epub = workspace.path.join("fixture.epub");
     let package = workspace.path.join("package");
     let request_capture = workspace.path.join("request.json");
     let analyzer = workspace.path.join("analyzer.sh");
     fs::write(&epub, minimal_epub()).expect("write EPUB fixture");
-    fs::write(
-        &analyzer,
-        format!(
-            r#"#!/bin/sh
-tee '{}' >/dev/null
-printf '%s' '{{"summary":{{"one_sentence":"One sentence.","short":"Short summary.","deep":"Deep summary.","role_in_book":"Introduces the fixture."}},"key_ideas":["Determinism"],"concepts":[],"claims":[],"argument_flow":[],"difficult_passages":[],"entities":[]}}'
-"#,
-            request_capture.display()
-        ),
-    )
-    .expect("write analyzer fixture");
+    let script = r#"#!/bin/sh
+request=$(cat)
+case "$request" in
+  *'"task":"book_synthesis"'*)
+    printf '%s' '{"book_map":{"central_question":"What makes a deterministic fixture?","thesis":"Stable inputs produce stable outputs.","chapter_roles":[{"chapter_id":"chapter_001","role":"Introduces the fixture.","depends_on_chapter_ids":[]}],"reading_paths":[{"path_id":"deep","kind":"deep","title":"Deep","description":"Read all details.","chapter_ids":["chapter_001"]},{"path_id":"fast","kind":"fast","title":"Fast","description":"Read the key chapter.","chapter_ids":["chapter_001"]},{"path_id":"selective","kind":"selective","title":"Selective","description":"Inspect the fixture.","chapter_ids":["chapter_001"]}],"difficulty_map":[{"chapter_id":"chapter_001","level":"introductory","reason":"Short fixture."}],"key_chapter_ids":["chapter_001"]},"concepts":[],"claims":[],"entities":[],"checkpoints":[{"checkpoint_id":"checkpoint_001","chapter_id":"chapter_001","summary":"The fixture is deterministic.","must_understand":["Stable input","Stable parse","Stable output"],"recall_questions":[{"question_id":"recall_001","prompt":"What is stable?","expected_points":["Input and output"]}],"reflection_questions":[{"question_id":"reflection_001","prompt":"Why does stability matter?","expected_points":["Repeatability"]}],"flashcards":[{"flashcard_id":"flashcard_001","front":"Determinism","back":"Stable input produces stable output.","concept_ids":[]}],"source_refs":[],"grounding":"inferred"}],"book_reflection_questions":[{"question_id":"book_reflection_001","prompt":"How would you test determinism?","expected_points":["Repeat the compile"]}]}'
+    ;;
+  *)
+    printf '%s' "$request" > '__CAPTURE__'
+    printf '%s' '{"summary":{"one_sentence":"One sentence.","short":"Short summary.","deep":"Deep summary.","role_in_book":"Introduces the fixture."},"key_ideas":["Determinism"],"concepts":[],"claims":[],"argument_flow":[],"difficult_passages":[],"entities":[]}'
+    ;;
+esac
+"#
+    .replace("__CAPTURE__", &request_capture.display().to_string());
+    fs::write(&analyzer, script).expect("write analyzer fixture");
     let mut permissions = fs::metadata(&analyzer)
         .expect("analyzer metadata")
         .permissions();
@@ -143,8 +146,52 @@ printf '%s' '{{"summary":{{"one_sentence":"One sentence.","short":"Short summary
         serde_json::from_slice(&fs::read(&analysis_path).expect("read chapter analysis"))
             .expect("parse chapter analysis");
     assert_eq!(analysis["schema_version"], "0.1");
+    assert_eq!(analysis["analysis_profile"], "standard");
     assert_eq!(analysis["chapter_id"], "chapter_001");
     assert_eq!(analysis["summary"]["one_sentence"], "One sentence.");
+
+    for name in [
+        "book_map.json",
+        "concepts.json",
+        "claims.json",
+        "entities.json",
+        "checkpoints.json",
+        "recall_cards.json",
+        "eval_report.json",
+        "compile_status.json",
+    ] {
+        assert!(package.join(name).is_file(), "missing {name}");
+    }
+    let validate_output = codexia(&["validate", path_text(&package)]);
+    assert_success(&validate_output);
+    assert!(stderr(&validate_output).contains("analysis artifacts: ok"));
+
+    let cached_output = codexia(&[
+        "compile",
+        path_text(&epub),
+        "--out",
+        path_text(&package),
+        "--analyzer-command",
+        path_text(&analyzer),
+        "--analysis-jobs",
+        "1",
+    ]);
+    assert_success(&cached_output);
+    assert!(stderr(&cached_output).contains("Reused cached package"));
+
+    let book_map_path = package.join("book_map.json");
+    let mut book_map: Value =
+        serde_json::from_slice(&fs::read(&book_map_path).expect("read book map"))
+            .expect("parse book map");
+    book_map["source_hash"] = Value::from("wrong");
+    fs::write(
+        &book_map_path,
+        serde_json::to_vec_pretty(&book_map).expect("serialize corrupt book map"),
+    )
+    .expect("write corrupt book map");
+    let corrupt_output = codexia(&["validate", path_text(&package)]);
+    assert!(!corrupt_output.status.success());
+    assert!(stderr(&corrupt_output).contains("source_hash does not match"));
 }
 
 #[test]
@@ -184,6 +231,17 @@ fn cli_rejects_ambiguous_or_incomplete_arguments() {
     ]);
     assert!(!jobs_without_analyzer.status.success());
     assert!(stderr(&jobs_without_analyzer).contains("requires --analyzer-command"));
+
+    let zero_chapter = codexia(&[
+        "compile",
+        path_text(&epub),
+        "--out",
+        path_text(&workspace.path.join("package")),
+        "--analyze-through",
+        "0",
+    ]);
+    assert!(!zero_chapter.status.success());
+    assert!(stderr(&zero_chapter).contains("positive chapter number"));
 }
 
 fn codexia(args: &[&str]) -> Output {

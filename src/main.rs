@@ -16,7 +16,8 @@ use std::{
     process::ExitCode,
 };
 
-use codexia::chapter_analysis::{self, AnalysisOptions, CommandChapterAnalyzer};
+use codexia::book_analysis::{self, CompileStatus, EvalReport, GroundingBlock};
+use codexia::chapter_analysis::{self, AnalysisOptions, ChapterAnalysis, CommandChapterAnalyzer};
 use codexia::epub_parser;
 use codexia::ir;
 use codexia::ir::Profile;
@@ -97,6 +98,8 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     let mut profile_set = false;
     let mut analyzer_command = None;
     let mut analysis_jobs = None;
+    let mut analyze_through = None;
+    let mut force = false;
     let mut path = None;
 
     let mut index = 0;
@@ -139,6 +142,21 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
                 }
                 analysis_jobs = Some(jobs);
             }
+            "--analyze-through" => {
+                index += 1;
+                let value = option_value(args, index, "--analyze-through")?;
+                if analyze_through.is_some() {
+                    return Err("--analyze-through may only be specified once".to_owned());
+                }
+                let chapter = value.parse::<u32>().map_err(|_| {
+                    "--analyze-through must be a positive chapter number".to_owned()
+                })?;
+                if chapter == 0 {
+                    return Err("--analyze-through must be a positive chapter number".to_owned());
+                }
+                analyze_through = Some(chapter);
+            }
+            "--force" => force = true,
             value if value.starts_with('-') => {
                 return Err(format!("unknown compile option: {value}"));
             }
@@ -165,6 +183,15 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
 
     let bytes = fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let source_hash = hex_encode(pagelet::core::ContentHash::from_bytes(&bytes).as_bytes());
+    let out = PathBuf::from(&out_dir);
+
+    if analyzer_command.is_some()
+        && !force
+        && cached_package_matches(&out, &source_hash, profile, analyze_through)
+    {
+        eprintln!("Reused cached package for source_hash {source_hash} at {out_dir}/");
+        return Ok(());
+    }
 
     let book_ir = epub_parser::parse_epub(&bytes)?;
     let book_ir_json = ir::book_ir_to_json(&book_ir);
@@ -174,8 +201,8 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     let blocks_jsonl = normalizer::blocks_jsonl(&book_ir.blocks);
     let manifest_json = normalizer::manifest_json(&compiled.manifest);
 
-    let out = PathBuf::from(&out_dir);
     fs::create_dir_all(&out).map_err(|e| format!("cannot create directory {out_dir}: {e}"))?;
+    clear_enriched_outputs(&out)?;
 
     fs::write(out.join("book_ir.json"), &book_ir_json)
         .map_err(|e| format!("cannot write book_ir.json: {e}"))?;
@@ -186,35 +213,141 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     fs::write(out.join("manifest.json"), &manifest_json)
         .map_err(|e| format!("cannot write manifest.json: {e}"))?;
 
-    let analysis_count = if let Some(command) = analyzer_command {
-        let analyzer = CommandChapterAnalyzer::new(command);
-        let analyses = chapter_analysis::analyze_book(
-            &book_ir,
-            &analyzer,
-            AnalysisOptions {
-                max_parallelism: analysis_jobs
-                    .unwrap_or_else(|| AnalysisOptions::default().max_parallelism),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        chapter_analysis::write_chapter_analyses(&out, &analyses)
-            .map_err(|error| error.to_string())?;
-        analyses.len()
-    } else {
-        0
+    let Some(command) = analyzer_command else {
+        eprintln!(
+            "Compiled {path} -> {out_dir}/ (4 files, {} blocks, {} chapters, profile: {})",
+            book_ir.blocks.len(),
+            book_ir.chapters.len(),
+            chapter_analysis::profile_name(profile),
+        );
+        return Ok(());
     };
 
-    let file_count = 4 + analysis_count;
+    let total_analyzable_chapter_count = book_ir
+        .chapters
+        .iter()
+        .filter(|chapter| !chapter.is_noise && chapter.block_count > 0)
+        .count();
+    let mut status = CompileStatus {
+        schema_version: book_analysis::BOOK_ANALYSIS_VERSION.to_owned(),
+        source_hash: source_hash.clone(),
+        profile: chapter_analysis::profile_name(profile).to_owned(),
+        ready_stages: vec!["parse".to_owned(), "normalize".to_owned()],
+        analyzed_through: analyze_through,
+        analyzed_chapter_count: 0,
+        total_analyzable_chapter_count,
+        complete: false,
+    };
+    book_analysis::write_compile_status(&out, &status)?;
+
+    let analyzer = CommandChapterAnalyzer::new(command);
+    let analyses = chapter_analysis::analyze_book(
+        &book_ir,
+        &analyzer,
+        AnalysisOptions {
+            max_parallelism: analysis_jobs
+                .unwrap_or_else(|| AnalysisOptions::default().max_parallelism),
+            profile,
+            analyze_through,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    chapter_analysis::write_chapter_analyses(&out, &analyses).map_err(|error| error.to_string())?;
+    status.ready_stages.push("chapter_analysis".to_owned());
+    status.analyzed_chapter_count = analyses.len();
+    book_analysis::write_compile_status(&out, &status)?;
+
+    let synthesis =
+        book_analysis::synthesize_book(&book_ir, &analyses, &analyzer, profile, analyze_through)
+            .map_err(|error| error.to_string())?;
+    let documents = book_analysis::SynthesisDocuments::new(&source_hash, synthesis.clone());
+    book_analysis::write_synthesis_documents(&out, &documents)
+        .map_err(|error| error.to_string())?;
+    status.ready_stages.push("book_synthesis".to_owned());
+    book_analysis::write_compile_status(&out, &status)?;
+
+    let report = book_analysis::validate_grounding(
+        &source_hash,
+        &book_analysis::grounding_blocks(&book_ir),
+        &analyses,
+        &synthesis,
+    );
+    book_analysis::write_eval_report(&out, &report).map_err(|error| error.to_string())?;
+    if !report.valid {
+        return Err(format!(
+            "grounding validation failed; see {}/eval_report.json",
+            out.display()
+        ));
+    }
+    status.ready_stages.push("grounding_validation".to_owned());
+    status.complete = true;
+    book_analysis::write_compile_status(&out, &status)?;
+
+    let analysis_count = analyses.len();
+    let file_count = 12 + analysis_count;
     eprintln!(
-        "Compiled {path} -> {out_dir}/ ({file_count} files, {} blocks, {} chapters, {analysis_count} analyses, profile: {})",
+        "Compiled {path} -> {out_dir}/ ({file_count} files, {} blocks, {} chapters, {analysis_count} analyses, profile: {}, grounding warnings: {})",
         book_ir.blocks.len(),
         book_ir.chapters.len(),
-        match profile {
-            Profile::Basic => "basic",
-            Profile::Standard => "standard",
-            Profile::Deep => "deep",
-        },
+        chapter_analysis::profile_name(profile),
+        report.issues.len(),
     );
+    Ok(())
+}
+
+fn cached_package_matches(
+    out: &Path,
+    source_hash: &str,
+    profile: Profile,
+    analyze_through: Option<u32>,
+) -> bool {
+    let Ok(status) = book_analysis::read_compile_status(out) else {
+        return false;
+    };
+    status.complete
+        && status.source_hash == source_hash
+        && status.profile == chapter_analysis::profile_name(profile)
+        && status.analyzed_through == analyze_through
+        && status
+            .ready_stages
+            .iter()
+            .any(|stage| stage == "grounding_validation")
+        && validate_package(out).is_ok()
+}
+
+fn clear_enriched_outputs(out: &Path) -> Result<(), String> {
+    for name in [
+        "compile_status.json",
+        "book_map.json",
+        "concepts.json",
+        "claims.json",
+        "entities.json",
+        "checkpoints.json",
+        "recall_cards.json",
+        "eval_report.json",
+    ] {
+        let path = out.join(name);
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot replace {}: {error}", path.display()))?;
+        }
+    }
+    let chapters_dir = out.join("chapters");
+    let Ok(entries) = fs::read_dir(&chapters_dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read chapters directory: {error}"))?;
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".analysis.json"))
+        {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot replace {}: {error}", path.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -237,6 +370,9 @@ fn cmd_validate(args: &[String]) -> Result<(), String> {
         "blocks.jsonl",
     ] {
         eprintln!("  {name}: ok");
+    }
+    if dir_path.join("compile_status.json").is_file() {
+        eprintln!("  analysis artifacts: ok");
     }
     eprintln!(
         "Package at {dir} is valid ({} blocks, {} chapters).",
@@ -272,6 +408,7 @@ fn validate_package(dir: &Path) -> Result<PackageStats, Vec<String>> {
     };
 
     validate_package_values(&manifest, &structure, &book_ir, &blocks, &mut errors);
+    validate_enriched_package(dir, &manifest, &blocks, &mut errors);
     if errors.is_empty() {
         Ok(PackageStats {
             block_count: blocks.len(),
@@ -283,6 +420,270 @@ fn validate_package(dir: &Path) -> Result<PackageStats, Vec<String>> {
     } else {
         Err(errors)
     }
+}
+
+fn validate_enriched_package(
+    dir: &Path,
+    manifest: &Value,
+    blocks: &[Value],
+    errors: &mut Vec<String>,
+) {
+    if !dir.join("compile_status.json").is_file() {
+        return;
+    }
+    let Some(status_value) = read_json_file(dir, "compile_status.json", errors) else {
+        return;
+    };
+    let status: CompileStatus = match serde_json::from_value(status_value) {
+        Ok(status) => status,
+        Err(error) => {
+            errors.push(format!("compile_status.json: invalid schema: {error}"));
+            return;
+        }
+    };
+    if status.schema_version != book_analysis::BOOK_ANALYSIS_VERSION {
+        errors.push("compile_status.json: unsupported schema_version".to_owned());
+    }
+    if manifest.get("source_hash").and_then(Value::as_str) != Some(&status.source_hash) {
+        errors.push("compile_status.json: source_hash does not match manifest.json".to_owned());
+    }
+    if manifest.get("profile").and_then(Value::as_str) != Some(&status.profile) {
+        errors.push("compile_status.json: profile does not match manifest.json".to_owned());
+    }
+    let expected_stage_order = [
+        "parse",
+        "normalize",
+        "chapter_analysis",
+        "book_synthesis",
+        "grounding_validation",
+    ];
+    if status
+        .ready_stages
+        .iter()
+        .map(String::as_str)
+        .ne(
+            expected_stage_order[..status.ready_stages.len().min(expected_stage_order.len())]
+                .iter()
+                .copied(),
+        )
+        || status.ready_stages.len() > expected_stage_order.len()
+    {
+        errors.push("compile_status.json: ready_stages are not a valid pipeline prefix".to_owned());
+    }
+    if !status.complete {
+        errors.push("compile_status.json: compilation is incomplete".to_owned());
+    } else if status.ready_stages.last().map(String::as_str) != Some("grounding_validation") {
+        errors.push(
+            "compile_status.json: complete package must reach grounding_validation".to_owned(),
+        );
+    }
+
+    let analyses = if status
+        .ready_stages
+        .iter()
+        .any(|stage| stage == "chapter_analysis")
+    {
+        read_chapter_analyses(dir, status.analyzed_chapter_count, errors)
+    } else {
+        Vec::new()
+    };
+    if analyses
+        .iter()
+        .any(|analysis| analysis.analysis_profile != status.profile)
+    {
+        errors.push("chapter analyses: analysis_profile does not match compile status".to_owned());
+    }
+
+    let documents = if status
+        .ready_stages
+        .iter()
+        .any(|stage| stage == "book_synthesis")
+    {
+        match book_analysis::read_synthesis_documents(dir) {
+            Ok(documents) => {
+                validate_document_metadata(&documents, &status, errors);
+                if let Err(error) =
+                    book_analysis::validate_synthesis_documents(&documents, &analyses)
+                {
+                    errors.push(format!("book synthesis: {error}"));
+                }
+                let expected = book_analysis::SynthesisDocuments::new(
+                    &status.source_hash,
+                    documents.generated(),
+                );
+                if expected.recall_cards != documents.recall_cards {
+                    errors.push(
+                        "recall_cards.json: records do not match checkpoints.json".to_owned(),
+                    );
+                }
+                Some(documents)
+            }
+            Err(error) => {
+                errors.push(error);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if status
+        .ready_stages
+        .iter()
+        .any(|stage| stage == "grounding_validation")
+    {
+        let Some(report_value) = read_json_file(dir, "eval_report.json", errors) else {
+            return;
+        };
+        let report: EvalReport = match serde_json::from_value(report_value) {
+            Ok(report) => report,
+            Err(error) => {
+                errors.push(format!("eval_report.json: invalid schema: {error}"));
+                return;
+            }
+        };
+        let Some(documents) = documents else {
+            errors.push("eval_report.json: book synthesis documents are unavailable".to_owned());
+            return;
+        };
+        let block_map = grounding_blocks_from_values(blocks, errors);
+        let expected = book_analysis::validate_grounding(
+            &status.source_hash,
+            &block_map,
+            &analyses,
+            &documents.generated(),
+        );
+        if report != expected {
+            errors.push("eval_report.json: report does not match package contents".to_owned());
+        }
+        if !report.valid {
+            errors.push("eval_report.json: grounding validation failed".to_owned());
+        }
+    }
+}
+
+fn validate_document_metadata(
+    documents: &book_analysis::SynthesisDocuments,
+    status: &CompileStatus,
+    errors: &mut Vec<String>,
+) {
+    for (name, version, source_hash) in [
+        (
+            "book_map.json",
+            &documents.book_map.schema_version,
+            &documents.book_map.source_hash,
+        ),
+        (
+            "concepts.json",
+            &documents.concepts.schema_version,
+            &documents.concepts.source_hash,
+        ),
+        (
+            "claims.json",
+            &documents.claims.schema_version,
+            &documents.claims.source_hash,
+        ),
+        (
+            "entities.json",
+            &documents.entities.schema_version,
+            &documents.entities.source_hash,
+        ),
+        (
+            "checkpoints.json",
+            &documents.checkpoints.schema_version,
+            &documents.checkpoints.source_hash,
+        ),
+        (
+            "recall_cards.json",
+            &documents.recall_cards.schema_version,
+            &documents.recall_cards.source_hash,
+        ),
+    ] {
+        if version != book_analysis::BOOK_ANALYSIS_VERSION {
+            errors.push(format!("{name}: unsupported schema_version"));
+        }
+        if source_hash != &status.source_hash {
+            errors.push(format!("{name}: source_hash does not match compile status"));
+        }
+    }
+}
+
+fn read_chapter_analyses(
+    dir: &Path,
+    expected_count: usize,
+    errors: &mut Vec<String>,
+) -> Vec<ChapterAnalysis> {
+    let chapters_dir = dir.join("chapters");
+    let entries = match fs::read_dir(&chapters_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!("chapters: {error}"));
+            return Vec::new();
+        }
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".analysis.json"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut analyses = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("chapter analysis");
+        match fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<ChapterAnalysis>(&bytes).map_err(|error| error.to_string())
+            }) {
+            Ok(analysis) => analyses.push(analysis),
+            Err(error) => errors.push(format!("chapters/{name}: invalid schema: {error}")),
+        }
+    }
+    if analyses.len() != expected_count {
+        errors.push(format!(
+            "chapter analysis count mismatch: status is {expected_count}, files are {}",
+            analyses.len()
+        ));
+    }
+    analyses
+}
+
+fn grounding_blocks_from_values(
+    blocks: &[Value],
+    errors: &mut Vec<String>,
+) -> BTreeMap<String, GroundingBlock> {
+    let mut result = BTreeMap::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let path = format!("blocks.jsonl line {}", index + 1);
+        let (Some(block_id), Some(chapter_index), Some(text), Some(text_fingerprint)) = (
+            block.get("block_id").and_then(Value::as_str),
+            block
+                .get("chapter_index")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
+            block.get("text").and_then(Value::as_str),
+            block.get("text_fingerprint").and_then(Value::as_str),
+        ) else {
+            errors.push(format!("{path}: cannot build grounding index"));
+            continue;
+        };
+        result.insert(
+            block_id.to_owned(),
+            GroundingBlock {
+                chapter_index,
+                text: text.to_owned(),
+                text_fingerprint: text_fingerprint.to_owned(),
+            },
+        );
+    }
+    result
 }
 
 fn read_json_file(dir: &Path, name: &str, errors: &mut Vec<String>) -> Option<Value> {
@@ -579,6 +980,7 @@ fn print_help() {
     println!("  codexia parse <input.epub> [--output <file>]");
     println!("  codexia compile <input.epub> --out <dir> [--profile basic|standard|deep]");
     println!("    [--analyzer-command <executable>] [--analysis-jobs <count>]");
+    println!("    [--analyze-through <chapter-number>] [--force]");
     println!("  codexia validate <dir>");
 }
 

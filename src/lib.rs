@@ -5,6 +5,7 @@
 //! (parsed by pagelet) into a normalised Book IR suitable for LLM analysis,
 //! grounding validation, and reader sessions.
 
+pub mod book_analysis;
 pub mod chapter_analysis;
 pub mod epub_parser;
 pub mod ir;
