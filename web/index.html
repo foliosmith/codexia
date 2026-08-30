@@ -252,6 +252,8 @@
         read_until: {chapter_id:chapterId, block_id:lastBlock?.block_id || null, char_offset:lastBlock ? Array.from(lastBlock.text).length : null, epub_cfi:null},
         progress_basis_points: Math.max(state.session.progress_basis_points, progress),
       }));
+      document.body.dataset.codexiaBookId = state.bootstrap.book.book_id;
+      document.body.dataset.codexiaReaderState = JSON.stringify(readerState());
       app.innerHTML = `<div class="reader-shell">
         <aside class="reader-sidebar" aria-label="阅读导航">${sidebarHtml(chapterId)}</aside>
         <article class="reader-main"><h1>${esc(chapter.title)}</h1><div id="chapter-blocks">${chapter.blocks.map(blockHtml).join('')}</div><div class="chapter-end" id="chapter-end"><h2>本章结束</h2><p>准备好后，进入复盘循环。</p><button class="primary-button" id="checkpoint-button">开始复盘</button><div id="checkpoint-content"></div></div></article>
@@ -314,7 +316,7 @@
       const block = range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer.closest?.('.reader-block') : range.commonAncestorContainer.parentElement?.closest('.reader-block');
       if (!block || !block.contains(range.startContainer) || !block.contains(range.endContainer)) return;
       const prefix = range.cloneRange(); prefix.selectNodeContents(block); prefix.setEnd(range.startContainer, range.startOffset);
-      const start = prefix.toString().length; const end = start + text.length;
+      const start = Array.from(prefix.toString()).length; const end = start + Array.from(text).length;
       state.selection = {text, block_id:block.dataset.blockId, text_fingerprint:block.dataset.fingerprint, start_char:start, end_char:end, chapter_id:state.chapter.chapter_id};
       const rect = range.getBoundingClientRect();
       selectionMenu.style.left = `${Math.max(10, Math.min(rect.left, innerWidth - selectionMenu.offsetWidth - 10))}px`;

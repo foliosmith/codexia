@@ -7,6 +7,7 @@
 //!   codexia validate <dir>                                  Validate a compiled package
 //!   codexia serve <dir> [--bind <address>]                  Run the Web Reader
 //!   codexia studio <dir> [--bind <address>]                 Run Book Agent Studio
+//!   codexia api <library-dir> --api-key-file <file>          Run Public API
 //!   codexia help                                            Show help
 
 #![forbid(unsafe_code)]
@@ -43,6 +44,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [cmd, rest @ ..] if cmd == "validate" => cmd_validate(rest),
         [cmd, rest @ ..] if cmd == "serve" => cmd_serve(rest),
         [cmd, rest @ ..] if cmd == "studio" => cmd_studio(rest),
+        [cmd, rest @ ..] if cmd == "api" => cmd_api(rest),
         [cmd] if matches!(cmd.as_str(), "-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -52,6 +54,91 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         [cmd, ..] => Err(format!("unknown codexia command: {cmd}")),
+    }
+}
+
+fn cmd_api(args: &[String]) -> Result<(), String> {
+    let mut library_dir = None;
+    let mut api_key_file = None;
+    let mut analyzer_command = None;
+    let mut webhook_url = None;
+    let mut bind = "127.0.0.1:8790".to_owned();
+    let mut rate_limit_per_minute = 60_usize;
+    let mut agent_request_cost_micros = 0_u64;
+    let mut compile_cost_micros = 0_u64;
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        match option {
+            "--api-key-file"
+            | "--analyzer-command"
+            | "--webhook-url"
+            | "--bind"
+            | "--rate-limit-per-minute"
+            | "--agent-cost-micros"
+            | "--compile-cost-micros" => {
+                index += 1;
+                let value = option_value(args, index, option)?;
+                match option {
+                    "--api-key-file" => set_once(&mut api_key_file, value, option)?,
+                    "--analyzer-command" => set_once(&mut analyzer_command, value, option)?,
+                    "--webhook-url" => set_once(&mut webhook_url, value, option)?,
+                    "--bind" => bind = value.to_owned(),
+                    "--rate-limit-per-minute" => {
+                        rate_limit_per_minute = value
+                            .parse()
+                            .map_err(|_| "--rate-limit-per-minute must be positive".to_owned())?;
+                    }
+                    "--agent-cost-micros" => {
+                        agent_request_cost_micros = value
+                            .parse()
+                            .map_err(|_| "--agent-cost-micros must be an integer".to_owned())?;
+                    }
+                    "--compile-cost-micros" => {
+                        compile_cost_micros = value
+                            .parse()
+                            .map_err(|_| "--compile-cost-micros must be an integer".to_owned())?;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            value if value.starts_with('-') => return Err(format!("unknown api option: {value}")),
+            value => {
+                if library_dir.replace(value.to_owned()).is_some() {
+                    return Err("api accepts exactly one library directory".to_owned());
+                }
+            }
+        }
+        index += 1;
+    }
+    let library_dir = library_dir.ok_or_else(|| "api requires a library directory".to_owned())?;
+    let api_key_file = api_key_file.ok_or_else(|| "api requires --api-key-file".to_owned())?;
+    let api_key = fs::read_to_string(&api_key_file)
+        .map_err(|error| format!("cannot read API key file {api_key_file}: {error}"))?
+        .trim()
+        .to_owned();
+    let compiler_executable =
+        env::current_exe().map_err(|error| format!("cannot locate codexia executable: {error}"))?;
+    codexia::public_api::serve(
+        library_dir,
+        &bind,
+        codexia::public_api::PublicApiConfig {
+            api_key,
+            rate_limit_per_minute,
+            agent_request_cost_micros,
+            compile_cost_micros,
+            analyzer_command: analyzer_command.map(PathBuf::from),
+            webhook_url,
+            compiler_executable,
+        },
+    )
+}
+
+fn set_once(target: &mut Option<String>, value: &str, option: &str) -> Result<(), String> {
+    if target.replace(value.to_owned()).is_some() {
+        Err(format!("{option} may only be specified once"))
+    } else {
+        Ok(())
     }
 }
 
@@ -1057,6 +1144,9 @@ fn print_help() {
     println!("    [--state-dir <dir>] [--agent-command <executable>]");
     println!("  codexia studio <dir> [--bind 127.0.0.1:8788]");
     println!("    [--state-dir <dir>] [--agent-command <executable>]");
+    println!("  codexia api <library-dir> --api-key-file <file>");
+    println!("    [--bind 127.0.0.1:8790] [--analyzer-command <executable>]");
+    println!("    [--rate-limit-per-minute <count>] [--webhook-url <url>]");
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

@@ -1,0 +1,9 @@
+{
+  "id": "codexia-book-agent",
+  "name": "Codexia Book Agent",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Insert grounded Codexia book maps and chapter analyses into notes.",
+  "author": "Foliosmith",
+  "isDesktopOnly": false
+}

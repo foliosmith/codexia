@@ -11,6 +11,7 @@ pub mod epub_parser;
 pub mod ir;
 pub mod normalizer;
 pub mod pipeline;
+pub mod public_api;
 pub mod reader_cards;
 pub mod runtime_api;
 pub mod studio;

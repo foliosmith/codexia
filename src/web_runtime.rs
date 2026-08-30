@@ -1683,7 +1683,7 @@ struct CheckpointActionRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-struct RuntimeError {
+pub(crate) struct RuntimeError {
     status: u16,
     code: &'static str,
     message: String,
@@ -1739,7 +1739,7 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    fn json(status: u16, value: impl Serialize) -> Result<Self, RuntimeError> {
+    pub(crate) fn json(status: u16, value: impl Serialize) -> Result<Self, RuntimeError> {
         let body = serde_json::to_vec(&value).map_err(|error| {
             RuntimeError::internal(format!("cannot serialize response: {error}"))
         })?;
@@ -1766,7 +1766,7 @@ impl HttpResponse {
         }
     }
 
-    fn bytes(status: u16, content_type: impl Into<String>, body: Vec<u8>) -> Self {
+    pub(crate) fn bytes(status: u16, content_type: impl Into<String>, body: Vec<u8>) -> Self {
         Self {
             status,
             content_type: content_type.into(),
@@ -2030,13 +2030,23 @@ fn serve_surface(
     home: &str,
 ) -> Result<(), String> {
     let runtime = Arc::new(WebRuntime::load(package_dir, state_dir, agent_command)?);
+    serve_http(
+        bind,
+        home,
+        Arc::new(move |request| runtime.dispatch(&request.method, &request.target, &request.body)),
+    )
+}
+
+type HttpHandler = dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync;
+
+pub(crate) fn serve_http(bind: &str, home: &str, handler: Arc<HttpHandler>) -> Result<(), String> {
     let listener =
         TcpListener::bind(bind).map_err(|error| format!("cannot bind {bind}: {error}"))?;
     eprintln!("Codexia: http://{bind}{home}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_connection(&runtime, stream) {
+                if let Err(error) = handle_connection(handler.as_ref(), stream) {
                     eprintln!("request error: {error}");
                 }
             }
@@ -2046,19 +2056,20 @@ fn serve_surface(
     Ok(())
 }
 
-fn handle_connection(runtime: &WebRuntime, mut stream: TcpStream) -> Result<(), String> {
+fn handle_connection(handler: &HttpHandler, mut stream: TcpStream) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|error| error.to_string())?;
     let request = read_http_request(&mut stream)?;
-    let response = runtime.dispatch(&request.method, &request.target, &request.body);
+    let response = handler(&request);
     write_http_response(&mut stream, response)
 }
 
-struct HttpRequest {
-    method: String,
-    target: String,
-    body: Vec<u8>,
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    pub(crate) target: String,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Vec<u8>,
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
@@ -2092,10 +2103,13 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .next()
         .ok_or_else(|| "missing request target".to_owned())?
         .to_owned();
-    let content_length = lines
+    let headers = lines
         .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .map(|(_, value)| value.trim().parse::<usize>())
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let content_length = headers
+        .get("content-length")
+        .map(|value| value.parse::<usize>())
         .transpose()
         .map_err(|_| "invalid Content-Length".to_owned())?
         .unwrap_or(0);
@@ -2112,6 +2126,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     Ok(HttpRequest {
         method,
         target,
+        headers,
         body: bytes[header_end..header_end + content_length].to_vec(),
     })
 }

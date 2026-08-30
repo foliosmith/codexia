@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://foliosmith.dev/codexia/schemas/reader-card-0.1.json",
+  "title": "Codexia Reader Card",
+  "type": "object",
+  "required": [
+    "card_type",
+    "card_id",
+    "title",
+    "content",
+    "source_refs",
+    "confidence_basis_points",
+    "grounding",
+    "spoiler_status",
+    "follow_up_actions"
+  ],
+  "properties": {
+    "card_type": {
+      "enum": [
+        "book_map",
+        "chapter_summary",
+        "explanation",
+        "answer",
+        "concept",
+        "claim",
+        "checkpoint",
+        "flashcard",
+        "question",
+        "reflection",
+        "export"
+      ]
+    },
+    "card_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "content": { "type": "object" },
+    "source_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceRef" }
+    },
+    "confidence_basis_points": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "grounding": { "enum": ["grounded", "inferred"] },
+    "spoiler_status": {
+      "enum": ["within_boundary", "full_book_allowed"]
+    },
+    "follow_up_actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "grounding": { "const": "grounded" } } },
+      "then": { "properties": { "source_refs": { "minItems": 1 } } }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "sourceRef": {
+      "type": "object",
+      "required": ["block_id", "start_char", "end_char", "text_fingerprint"],
+      "properties": {
+        "block_id": { "type": "string", "minLength": 1 },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 },
+        "text_fingerprint": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "required": ["action", "label", "payload"],
+      "properties": {
+        "action": {
+          "enum": ["open_source", "ask", "explain", "quiz", "note", "export", "reflect"]
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,8 +1,14 @@
 use std::{
+    collections::BTreeMap,
     fs,
+    io::{Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::atomic::{AtomicU64, Ordering},
+    sync::{mpsc, Arc},
+    thread,
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -361,6 +367,118 @@ esac
     ] {
         assert!(eval["metrics"][metric].is_number(), "missing {metric}");
     }
+
+    let api_key = "codexia-test-key-123456";
+    let webhook_listener = TcpListener::bind("127.0.0.1:0").expect("bind webhook fixture");
+    let webhook_url = format!(
+        "http://{}/events",
+        webhook_listener.local_addr().expect("webhook address")
+    );
+    let (webhook_sender, webhook_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = webhook_listener.accept().expect("accept webhook");
+        let mut bytes = [0_u8; 8192];
+        let read = stream.read(&mut bytes).expect("read webhook");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .expect("respond to webhook");
+        webhook_sender
+            .send(String::from_utf8_lossy(&bytes[..read]).into_owned())
+            .expect("capture webhook");
+    });
+    let public_api = Arc::new(
+        codexia::public_api::PublicApi::load(
+            workspace.path.join("api-library"),
+            codexia::public_api::PublicApiConfig {
+                api_key: api_key.to_owned(),
+                rate_limit_per_minute: 100,
+                agent_request_cost_micros: 25,
+                compile_cost_micros: 1_000,
+                analyzer_command: Some(analyzer.clone()),
+                webhook_url: Some(webhook_url),
+                compiler_executable: PathBuf::from(env!("CARGO_BIN_EXE_codexia")),
+            },
+        )
+        .expect("load Public API"),
+    );
+    let openapi = public_api.dispatch("GET", "/openapi.json", &BTreeMap::new(), &[]);
+    assert_eq!(openapi.status(), 200);
+    serde_json::from_slice::<Value>(openapi.body()).expect("parse OpenAPI document");
+    let unauthorized = public_api.dispatch("GET", "/v1/usage", &BTreeMap::new(), &[]);
+    assert_eq!(unauthorized.status(), 401);
+    let api_headers = BTreeMap::from([
+        ("X-API-Key".to_owned(), api_key.to_owned()),
+        ("X-Codexia-Profile".to_owned(), "standard".to_owned()),
+    ]);
+    let accepted =
+        response_json(public_api.dispatch("POST", "/v1/books", &api_headers, &minimal_epub()));
+    let api_book_id = accepted["book_id"].as_str().expect("API book id");
+    let mut ready = false;
+    for _ in 0..100 {
+        let status = response_json(public_api.dispatch(
+            "GET",
+            &format!("/v1/books/{api_book_id}/status"),
+            &api_headers,
+            &[],
+        ));
+        match status["state"].as_str() {
+            Some("ready") => {
+                ready = true;
+                break;
+            }
+            Some("failed") => panic!("API compilation failed: {status}"),
+            _ => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    assert!(ready, "Public API compilation did not finish");
+    let webhook = webhook_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("processing webhook");
+    assert!(webhook.contains("book.processing.completed"));
+    thread::sleep(Duration::from_millis(50));
+    let map = response_json(public_api.dispatch(
+        "GET",
+        &format!("/v1/books/{api_book_id}/map"),
+        &api_headers,
+        &[],
+    ));
+    assert_eq!(
+        map["central_question"],
+        "What makes a deterministic fixture?"
+    );
+    let usage = response_json(public_api.dispatch("GET", "/v1/usage", &api_headers, &[]));
+    assert_eq!(usage["compile_count"], 1);
+    assert!(usage["estimated_cost_micros"]
+        .as_u64()
+        .is_some_and(|value| value >= 1_000));
+
+    let limited_api = Arc::new(
+        codexia::public_api::PublicApi::load(
+            workspace.path.join("limited-api"),
+            codexia::public_api::PublicApiConfig {
+                api_key: api_key.to_owned(),
+                rate_limit_per_minute: 1,
+                agent_request_cost_micros: 0,
+                compile_cost_micros: 0,
+                analyzer_command: None,
+                webhook_url: None,
+                compiler_executable: PathBuf::from(env!("CARGO_BIN_EXE_codexia")),
+            },
+        )
+        .expect("load limited API"),
+    );
+    assert_eq!(
+        limited_api
+            .dispatch("GET", "/v1/usage", &api_headers, &[])
+            .status(),
+        200
+    );
+    assert_eq!(
+        limited_api
+            .dispatch("GET", "/v1/usage", &api_headers, &[])
+            .status(),
+        429
+    );
 
     let book_map_path = package.join("book_map.json");
     let mut book_map: Value =

@@ -1,0 +1,124 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Codexia Book Agent API",
+    "version": "0.1.0"
+  },
+  "servers": [{ "url": "http://127.0.0.1:8790" }],
+  "security": [{ "ApiKey": [] }],
+  "paths": {
+    "/health": {
+      "get": { "security": [], "responses": { "200": { "description": "Healthy" } } }
+    },
+    "/openapi.json": {
+      "get": { "security": [], "responses": { "200": { "description": "OpenAPI document" } } }
+    },
+    "/v1/usage": {
+      "get": { "responses": { "200": { "description": "Usage and estimated cost", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Usage" } } } } } }
+    },
+    "/v1/books": {
+      "post": {
+        "parameters": [{ "name": "X-Codexia-Profile", "in": "header", "schema": { "enum": ["basic", "standard", "deep"] } }],
+        "requestBody": { "required": true, "content": { "application/epub+zip": { "schema": { "type": "string", "contentEncoding": "binary" } } } },
+        "responses": { "202": { "description": "Book accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BookAccepted" } } } } }
+      }
+    },
+    "/v1/books/{book_id}/status": { "$ref": "#/components/pathItems/BookStatus" },
+    "/v1/books/{book_id}/package": {
+      "get": { "parameters": [{ "$ref": "#/components/parameters/BookId" }], "responses": { "200": { "description": "Book Package manifest" } } }
+    },
+    "/v1/books/{book_id}/files/{name}": {
+      "get": { "parameters": [{ "$ref": "#/components/parameters/BookId" }, { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Package artifact" } } }
+    },
+    "/v1/books/{book_id}/map": {
+      "get": { "parameters": [{ "$ref": "#/components/parameters/BookId" }], "responses": { "200": { "description": "Book map" } } }
+    },
+    "/v1/books/{book_id}/concepts": {
+      "get": { "parameters": [{ "$ref": "#/components/parameters/BookId" }], "responses": { "200": { "description": "Concept index" } } }
+    },
+    "/v1/books/{book_id}/claims": {
+      "get": { "parameters": [{ "$ref": "#/components/parameters/BookId" }], "responses": { "200": { "description": "Claim index" } } }
+    },
+    "/v1/books/{book_id}/chapters/{chapter_id}/analysis": { "$ref": "#/components/pathItems/ChapterGet" },
+    "/v1/books/{book_id}/explain": { "$ref": "#/components/pathItems/AgentAction" },
+    "/v1/books/{book_id}/ask": { "$ref": "#/components/pathItems/AgentAction" },
+    "/v1/books/{book_id}/chapters/{chapter_id}/checkpoint": { "$ref": "#/components/pathItems/ChapterAction" },
+    "/v1/books/{book_id}/chapters/{chapter_id}/reflect": { "$ref": "#/components/pathItems/ChapterAction" },
+    "/v1/books/{book_id}/exports": { "$ref": "#/components/pathItems/AgentAction" },
+    "/v1/reader-sessions": {
+      "post": { "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "description": "Reader session" } } }
+    },
+    "/v1/reader-sessions/{session_id}": {
+      "get": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }], "responses": { "200": { "description": "Reader session" } } },
+      "patch": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "description": "Updated reader session" } } }
+    },
+    "/v1/reader-sessions/{session_id}/highlights": {
+      "post": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "description": "Stored highlight" } } }
+    },
+    "/v1/reader-sessions/{session_id}/notes": {
+      "post": { "parameters": [{ "$ref": "#/components/parameters/SessionId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "description": "Stored note" } } }
+    },
+    "/v1/exports/{export_id}": {
+      "get": { "parameters": [{ "name": "export_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Generated export" } } }
+    }
+  },
+  "webhooks": {
+    "processingEvent": {
+      "post": {
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebhookEvent" } } } },
+        "responses": { "200": { "description": "Webhook accepted" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKey": { "type": "apiKey", "in": "header", "name": "X-API-Key" }
+    },
+    "parameters": {
+      "BookId": { "name": "book_id", "in": "path", "required": true, "schema": { "type": "string" } },
+      "ChapterId": { "name": "chapter_id", "in": "path", "required": true, "schema": { "type": "string" } },
+      "SessionId": { "name": "session_id", "in": "path", "required": true, "schema": { "type": "string" } }
+    },
+    "requestBodies": {
+      "Json": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } }
+    },
+    "pathItems": {
+      "BookStatus": {
+        "get": {
+          "parameters": [{ "$ref": "#/components/parameters/BookId" }],
+          "responses": { "200": { "description": "Processing status" } }
+        }
+      },
+      "ChapterGet": {
+        "get": {
+          "parameters": [{ "$ref": "#/components/parameters/BookId" }, { "$ref": "#/components/parameters/ChapterId" }],
+          "responses": {
+            "200": {
+              "description": "Chapter analysis card",
+              "content": { "application/json": { "schema": { "$ref": "./reader-card.schema.json" } } }
+            }
+          }
+        }
+      },
+      "AgentAction": {
+        "post": {
+          "parameters": [{ "$ref": "#/components/parameters/BookId" }],
+          "requestBody": { "$ref": "#/components/requestBodies/Json" },
+          "responses": { "200": { "description": "Reader Card response" } }
+        }
+      },
+      "ChapterAction": {
+        "post": {
+          "parameters": [{ "$ref": "#/components/parameters/BookId" }, { "$ref": "#/components/parameters/ChapterId" }],
+          "requestBody": { "$ref": "#/components/requestBodies/Json" },
+          "responses": { "200": { "description": "Reader Card response" } }
+        }
+      }
+    },
+    "schemas": {
+      "BookAccepted": { "type": "object", "required": ["book_id", "status_href"], "properties": { "book_id": { "type": "string" }, "status_href": { "type": "string" } } },
+      "Usage": { "type": "object", "required": ["request_count", "estimated_cost_micros"], "properties": { "request_count": { "type": "integer" }, "compile_count": { "type": "integer" }, "agent_request_count": { "type": "integer" }, "input_bytes": { "type": "integer" }, "output_bytes": { "type": "integer" }, "estimated_cost_micros": { "type": "integer" } } },
+      "WebhookEvent": { "type": "object", "required": ["event", "book_id", "data"], "properties": { "event": { "enum": ["book.processing.completed", "book.processing.failed", "book.analysis.updated"] }, "book_id": { "type": "string" }, "data": { "type": "object" } } }
+    }
+  }
+}
