@@ -532,6 +532,12 @@ fn validate_generated(generated: &GeneratedChapterAnalysis) -> Result<(), Analys
     Ok(())
 }
 
+pub fn validate_generated_analysis(
+    generated: &GeneratedChapterAnalysis,
+) -> Result<(), AnalysisError> {
+    validate_generated(generated)
+}
+
 fn prompt_block(block: &Block) -> PromptBlock {
     PromptBlock {
         block_id: block.block_id.clone(),

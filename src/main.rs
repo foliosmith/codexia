@@ -6,6 +6,7 @@
 //!     [--analyzer-command <executable>] [--analysis-jobs <count>]
 //!   codexia validate <dir>                                  Validate a compiled package
 //!   codexia serve <dir> [--bind <address>]                  Run the Web Reader
+//!   codexia studio <dir> [--bind <address>]                 Run Book Agent Studio
 //!   codexia help                                            Show help
 
 #![forbid(unsafe_code)]
@@ -41,6 +42,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [cmd, rest @ ..] if cmd == "compile" => cmd_compile(rest),
         [cmd, rest @ ..] if cmd == "validate" => cmd_validate(rest),
         [cmd, rest @ ..] if cmd == "serve" => cmd_serve(rest),
+        [cmd, rest @ ..] if cmd == "studio" => cmd_studio(rest),
         [cmd] if matches!(cmd.as_str(), "-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -54,9 +56,22 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn cmd_serve(args: &[String]) -> Result<(), String> {
+    cmd_serve_surface(args, false)
+}
+
+fn cmd_studio(args: &[String]) -> Result<(), String> {
+    cmd_serve_surface(args, true)
+}
+
+fn cmd_serve_surface(args: &[String], studio: bool) -> Result<(), String> {
     let mut package_dir = None;
     let mut state_dir = None;
-    let mut bind = "127.0.0.1:8787".to_owned();
+    let mut bind = if studio {
+        "127.0.0.1:8788"
+    } else {
+        "127.0.0.1:8787"
+    }
+    .to_owned();
     let mut bind_set = false;
     let mut agent_command = None;
     let mut index = 0;
@@ -100,7 +115,11 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
     let state_dir = state_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&package_dir).join(".codexia-runtime"));
-    codexia::web_runtime::serve(package_dir, state_dir, &bind, agent_command)
+    if studio {
+        codexia::web_runtime::serve_studio(package_dir, state_dir, &bind, agent_command)
+    } else {
+        codexia::web_runtime::serve(package_dir, state_dir, &bind, agent_command)
+    }
 }
 
 fn cmd_parse(args: &[String]) -> Result<(), String> {
@@ -1035,6 +1054,8 @@ fn print_help() {
     println!("    [--analyze-through <chapter-number>] [--force]");
     println!("  codexia validate <dir>");
     println!("  codexia serve <dir> [--bind 127.0.0.1:8787]");
+    println!("    [--state-dir <dir>] [--agent-command <executable>]");
+    println!("  codexia studio <dir> [--bind 127.0.0.1:8788]");
     println!("    [--state-dir <dir>] [--agent-command <executable>]");
 }
 

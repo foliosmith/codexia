@@ -20,9 +20,11 @@ use crate::{
         CreateReaderSessionRequest, ReaderLocation, ReaderSession, ReaderState, SpoilerBoundary,
         SpoilerMode, UpdateReaderSessionRequest,
     },
+    studio::StudioRuntime,
 };
 
 const WEB_READER_HTML: &str = include_str!("../web/index.html");
+const STUDIO_HTML: &str = include_str!("../web/studio.html");
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const STATE_VERSION: &str = "0.1";
 
@@ -414,6 +416,7 @@ pub struct WebRuntime {
     state_dir: PathBuf,
     state: Mutex<PersistedState>,
     agent: Option<CommandAnalyzer>,
+    studio: StudioRuntime,
 }
 
 impl WebRuntime {
@@ -436,11 +439,14 @@ impl WebRuntime {
         } else {
             PersistedState::default()
         };
+        let agent = agent_command.map(CommandAnalyzer::new);
+        let studio = StudioRuntime::load(package_dir.as_ref(), &state_dir, agent.clone())?;
         Ok(Self {
             book,
             state_dir,
             state: Mutex::new(state),
-            agent: agent_command.map(CommandAnalyzer::new),
+            agent,
+            studio,
         })
     }
 
@@ -1752,6 +1758,14 @@ impl HttpResponse {
         }
     }
 
+    fn studio_html() -> Self {
+        Self {
+            status: 200,
+            content_type: "text/html; charset=utf-8".to_owned(),
+            body: STUDIO_HTML.as_bytes().to_vec(),
+        }
+    }
+
     fn bytes(status: u16, content_type: impl Into<String>, body: Vec<u8>) -> Self {
         Self {
             status,
@@ -1797,6 +1811,9 @@ impl WebRuntime {
         let (path, query) = target
             .split_once('?')
             .map_or((target, ""), |(path, query)| (path, query));
+        if method == "GET" && path == "/studio" {
+            return Ok(HttpResponse::studio_html());
+        }
         if method == "GET" && matches!(path, "/" | "/book" | "/reader" | "/report") {
             return Ok(HttpResponse::html());
         }
@@ -1808,6 +1825,17 @@ impl WebRuntime {
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
         match segments.as_slice() {
+            ["v1", "studio", rest @ ..] => {
+                let response =
+                    self.studio
+                        .dispatch(method, rest, body)
+                        .map_err(|error| RuntimeError {
+                            status: error.status,
+                            code: error.code,
+                            message: error.message,
+                        })?;
+                HttpResponse::json(response.status, response.body)
+            }
             ["v1", "books", book_id, rest @ ..] => {
                 self.require_book(book_id)?;
                 self.route_book(method, rest, query, body)
@@ -1982,10 +2010,29 @@ pub fn serve(
     bind: &str,
     agent_command: Option<PathBuf>,
 ) -> Result<(), String> {
+    serve_surface(package_dir, state_dir, bind, agent_command, "/")
+}
+
+pub fn serve_studio(
+    package_dir: impl AsRef<Path>,
+    state_dir: impl AsRef<Path>,
+    bind: &str,
+    agent_command: Option<PathBuf>,
+) -> Result<(), String> {
+    serve_surface(package_dir, state_dir, bind, agent_command, "/studio")
+}
+
+fn serve_surface(
+    package_dir: impl AsRef<Path>,
+    state_dir: impl AsRef<Path>,
+    bind: &str,
+    agent_command: Option<PathBuf>,
+    home: &str,
+) -> Result<(), String> {
     let runtime = Arc::new(WebRuntime::load(package_dir, state_dir, agent_command)?);
     let listener =
         TcpListener::bind(bind).map_err(|error| format!("cannot bind {bind}: {error}"))?;
-    eprintln!("Codexia Web Reader: http://{bind}");
+    eprintln!("Codexia: http://{bind}{home}");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

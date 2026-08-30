@@ -13,6 +13,7 @@ pub mod normalizer;
 pub mod pipeline;
 pub mod reader_cards;
 pub mod runtime_api;
+pub mod studio;
 pub mod web_runtime;
 
 /// Static build metadata for the codexia crate.

@@ -192,6 +192,9 @@ esac
     assert_eq!(page.status(), 200);
     assert!(page.content_type().starts_with("text/html"));
     assert!(String::from_utf8_lossy(page.body()).contains("reader-shell"));
+    let studio_page = runtime.dispatch("GET", "/studio", &[]);
+    assert_eq!(studio_page.status(), 200);
+    assert!(String::from_utf8_lossy(studio_page.body()).contains("Book Agent Studio"));
 
     let bootstrap = response_json(runtime.dispatch("GET", "/v1/bootstrap", &[]));
     let book_id = bootstrap["book"]["book_id"].as_str().expect("book id");
@@ -305,6 +308,59 @@ esac
         ),
     );
     assert!(Path::new(export["local_path"].as_str().expect("export path")).is_file());
+
+    let studio = response_json(runtime.dispatch("GET", "/v1/studio/snapshot", &[]));
+    let mut corrected = studio["chapters"]["chapter_001"].clone();
+    corrected["summary"]["one_sentence"] = Value::from("Corrected Studio summary.");
+    let manual_version = response_json(runtime.dispatch(
+        "PUT",
+        "/v1/studio/chapters/chapter_001",
+        &serde_json::to_vec(&corrected).expect("serialize correction"),
+    ));
+    let manual_version_id = manual_version["version_id"]
+        .as_str()
+        .expect("manual version id");
+    let versions =
+        response_json(runtime.dispatch("GET", "/v1/studio/chapters/chapter_001/versions", &[]));
+    assert_eq!(versions.as_array().map(Vec::len), Some(2));
+    let diff = response_json(
+        runtime.dispatch(
+            "POST",
+            "/v1/studio/compare",
+            &serde_json::to_vec(&serde_json::json!({
+                "kind": "chapter",
+                "id": "chapter_001",
+                "left_version": "base",
+                "right_version": manual_version_id,
+            }))
+            .expect("serialize version comparison"),
+        ),
+    );
+    assert!(diff.as_array().is_some_and(|items| items
+        .iter()
+        .any(|item| item["path"] == "$.summary.one_sentence")));
+    let reanalyzed = response_json(runtime.dispatch(
+        "POST",
+        "/v1/studio/chapters/chapter_001/reanalyze",
+        br#"{"analyzer_label":"fixture-v2"}"#,
+    ));
+    assert_eq!(reanalyzed["analyzer"], "fixture-v2");
+    let golden = response_json(runtime.dispatch(
+        "POST",
+        "/v1/studio/golden-books",
+        br#"{"label":"CLI Golden","annotations":{"summary":"approved"}}"#,
+    ));
+    assert_eq!(golden["label"], "CLI Golden");
+    let eval = response_json(runtime.dispatch("POST", "/v1/studio/evals", b"{}"));
+    for metric in [
+        "parse_quality",
+        "source_ref_validity",
+        "chapter_coverage",
+        "claim_grounding",
+        "concept_grounding",
+    ] {
+        assert!(eval["metrics"][metric].is_number(), "missing {metric}");
+    }
 
     let book_map_path = package.join("book_map.json");
     let mut book_map: Value =
