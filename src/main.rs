@@ -5,6 +5,7 @@
 //!   codexia compile <input.epub> --out <dir>                Compile Book Package
 //!     [--analyzer-command <executable>] [--analysis-jobs <count>]
 //!   codexia validate <dir>                                  Validate a compiled package
+//!   codexia serve <dir> [--bind <address>]                  Run the Web Reader
 //!   codexia help                                            Show help
 
 #![forbid(unsafe_code)]
@@ -39,6 +40,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         [cmd, rest @ ..] if cmd == "parse" => cmd_parse(rest),
         [cmd, rest @ ..] if cmd == "compile" => cmd_compile(rest),
         [cmd, rest @ ..] if cmd == "validate" => cmd_validate(rest),
+        [cmd, rest @ ..] if cmd == "serve" => cmd_serve(rest),
         [cmd] if matches!(cmd.as_str(), "-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -49,6 +51,56 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         [cmd, ..] => Err(format!("unknown codexia command: {cmd}")),
     }
+}
+
+fn cmd_serve(args: &[String]) -> Result<(), String> {
+    let mut package_dir = None;
+    let mut state_dir = None;
+    let mut bind = "127.0.0.1:8787".to_owned();
+    let mut bind_set = false;
+    let mut agent_command = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--state-dir" => {
+                index += 1;
+                let value = option_value(args, index, "--state-dir")?;
+                if state_dir.replace(value.to_owned()).is_some() {
+                    return Err("--state-dir may only be specified once".to_owned());
+                }
+            }
+            "--bind" => {
+                index += 1;
+                let value = option_value(args, index, "--bind")?;
+                if bind_set {
+                    return Err("--bind may only be specified once".to_owned());
+                }
+                bind = value.to_owned();
+                bind_set = true;
+            }
+            "--agent-command" => {
+                index += 1;
+                let value = option_value(args, index, "--agent-command")?;
+                if agent_command.replace(PathBuf::from(value)).is_some() {
+                    return Err("--agent-command may only be specified once".to_owned());
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown serve option: {value}"));
+            }
+            value => {
+                if package_dir.replace(value.to_owned()).is_some() {
+                    return Err("serve accepts exactly one package directory".to_owned());
+                }
+            }
+        }
+        index += 1;
+    }
+    let package_dir = package_dir.ok_or_else(|| "serve requires a package directory".to_owned())?;
+    let state_dir = state_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&package_dir).join(".codexia-runtime"));
+    codexia::web_runtime::serve(package_dir, state_dir, &bind, agent_command)
 }
 
 fn cmd_parse(args: &[String]) -> Result<(), String> {
@@ -982,6 +1034,8 @@ fn print_help() {
     println!("    [--analyzer-command <executable>] [--analysis-jobs <count>]");
     println!("    [--analyze-through <chapter-number>] [--force]");
     println!("  codexia validate <dir>");
+    println!("  codexia serve <dir> [--bind 127.0.0.1:8787]");
+    println!("    [--state-dir <dir>] [--agent-command <executable>]");
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

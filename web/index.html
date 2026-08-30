@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codexia Reader</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f5f2;
+      --panel: #ffffff;
+      --text: #20211f;
+      --muted: #6d7069;
+      --line: #dedfd9;
+      --accent: #285d4b;
+      --accent-soft: #e3eee9;
+      --mark: #ffe9a6;
+      --danger: #a13d35;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171916;
+        --panel: #20231f;
+        --text: #eceee9;
+        --muted: #a9afa6;
+        --line: #383d36;
+        --accent: #8fc9b3;
+        --accent-soft: #263b33;
+        --mark: #66551e;
+        --danger: #f19a90;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+    .app-header {
+      position: sticky; top: 0; z-index: 20; height: 52px; display: flex; align-items: center;
+      gap: 18px; padding: 0 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+    }
+    .brand { font-weight: 700; letter-spacing: .02em; }
+    .nav { display: flex; gap: 4px; }
+    .nav a { color: var(--muted); text-decoration: none; padding: 7px 9px; border-radius: 6px; }
+    .nav a[aria-current="page"] { color: var(--text); background: var(--accent-soft); }
+    .header-status { margin-left: auto; color: var(--muted); font-size: 13px; }
+    #app { min-height: calc(100vh - 52px); }
+    .page { max-width: 1120px; margin: 0 auto; padding: 28px 24px 60px; }
+    .page h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; }
+    .eyebrow { color: var(--muted); font-size: 13px; margin-bottom: 7px; }
+    .lead { color: var(--muted); max-width: 720px; line-height: 1.6; }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }
+    .stat, .section, .agent-card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+    }
+    .stat { padding: 15px; }
+    .stat strong { display: block; font-size: 22px; margin-top: 5px; }
+    .section { padding: 18px; margin: 14px 0; }
+    .section h2, .section h3 { margin-top: 0; }
+    .quiet-button, .primary-button, .action-button, .tab-button {
+      border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; color: var(--text); background: var(--panel);
+    }
+    .primary-button { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .reading-paths { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .path { padding: 13px; border: 1px solid var(--line); border-radius: 7px; }
+    .path h3 { font-size: 15px; margin: 0 0 6px; }
+    .muted { color: var(--muted); }
+    .reader-shell { display: grid; grid-template-columns: 230px minmax(360px, 720px) 320px; min-height: calc(100vh - 52px); }
+    .reader-sidebar, .agent-panel { position: sticky; top: 52px; height: calc(100vh - 52px); overflow: auto; background: var(--panel); }
+    .reader-sidebar { border-right: 1px solid var(--line); padding: 16px 12px; }
+    .agent-panel { border-left: 1px solid var(--line); padding: 14px; }
+    .reader-main { padding: 32px clamp(24px, 6vw, 76px) 120px; min-width: 0; }
+    .reader-main h1 { margin: 0 0 28px; font-family: ui-serif, Georgia, serif; }
+    .reader-block { font-family: ui-serif, Georgia, serif; font-size: 18px; line-height: 1.78; margin: 0 0 1.1em; scroll-margin-top: 70px; }
+    .reader-block[data-kind="heading"] { font-size: 22px; font-weight: 700; margin-top: 1.8em; }
+    .reader-block.saved-highlight { background: var(--mark); border-radius: 3px; }
+    .sidebar-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 14px 8px 7px; }
+    .toc-button, .concept-button { width: 100%; text-align: left; border: 0; color: var(--text); background: transparent; padding: 8px; border-radius: 5px; }
+    .toc-button:hover, .concept-button:hover, .toc-button[aria-current="page"] { background: var(--accent-soft); }
+    .progress-track { height: 5px; background: var(--line); border-radius: 10px; overflow: hidden; margin: 8px; }
+    .progress-fill { height: 100%; background: var(--accent); }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+    .tab-button { border: 0; border-radius: 5px 5px 0 0; color: var(--muted); }
+    .tab-button[aria-selected="true"] { color: var(--text); background: var(--accent-soft); }
+    .agent-card { padding: 13px; margin: 10px 0; }
+    .agent-card h3 { font-size: 15px; margin: 0 0 8px; }
+    .agent-card p, .agent-card li { font-size: 14px; line-height: 1.55; }
+    .card-meta { color: var(--muted); font-size: 12px; margin-top: 10px; }
+    .source-button { border: 0; padding: 4px 0; color: var(--accent); background: transparent; }
+    .chat-form { display: flex; gap: 6px; margin-top: 10px; }
+    .chat-form input { min-width: 0; flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 9px; background: var(--bg); color: var(--text); }
+    .selection-menu {
+      position: fixed; z-index: 30; display: none; gap: 4px; max-width: calc(100vw - 20px); padding: 6px;
+      border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 28px #0002;
+      overflow-x: auto;
+    }
+    .selection-menu.visible { display: flex; }
+    .selection-menu button { white-space: nowrap; border: 0; border-radius: 5px; padding: 7px 9px; background: transparent; color: var(--text); }
+    .selection-menu button:hover { background: var(--accent-soft); }
+    .chapter-end { margin-top: 50px; padding: 18px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft); }
+    .checkpoint-question textarea { width: 100%; min-height: 90px; resize: vertical; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
+    .error { color: var(--danger); }
+    .empty { color: var(--muted); padding: 20px 0; }
+    @media (max-width: 980px) {
+      .reader-shell { grid-template-columns: 190px minmax(0, 1fr); }
+      .agent-panel { position: static; grid-column: 1 / -1; height: auto; border: 1px solid var(--line); }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 680px) {
+      .app-header { padding: 0 10px; gap: 8px; }
+      .brand { display: none; }
+      .header-status { display: none; }
+      .page { padding: 20px 14px 50px; }
+      .reader-shell { display: block; }
+      .reader-sidebar { position: static; height: auto; max-height: 220px; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .reader-main { padding: 24px 18px 80px; }
+      .agent-panel { border-left: 0; }
+      .stats, .reading-paths { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">Codexia</div>
+    <nav class="nav" aria-label="主导航">
+      <a href="#home" data-route="home">首页</a>
+      <a href="#book" data-route="book">全书地图</a>
+      <a href="#read" data-route="read">阅读</a>
+      <a href="#report" data-route="report">阅读报告</a>
+    </nav>
+    <div class="header-status" id="header-status">加载中</div>
+  </header>
+  <main id="app" aria-live="polite"></main>
+  <div class="selection-menu" id="selection-menu" role="toolbar" aria-label="选中文本操作">
+    <button data-intent="explain">解释</button>
+    <button data-intent="simplify">简化</button>
+    <button data-intent="importance">为什么重要</button>
+    <button data-intent="connect">连接前文</button>
+    <button data-intent="concept">提取概念</button>
+    <button data-intent="note">生成笔记</button>
+    <button data-intent="quiz">考考我</button>
+    <button data-intent="highlight">高亮</button>
+  </div>
+  <script>
+    const app = document.querySelector('#app');
+    const selectionMenu = document.querySelector('#selection-menu');
+    const state = { bootstrap: null, session: null, chapter: null, analysis: null, cards: [], selection: null, tab: 'context' };
+
+    const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    const api = async (path, options = {}) => {
+      const response = await fetch(path, { headers: {'Content-Type':'application/json'}, ...options });
+      const type = response.headers.get('content-type') || '';
+      const payload = type.includes('json') ? await response.json() : await response.blob();
+      if (!response.ok) throw new Error(payload.error?.message || `HTTP ${response.status}`);
+      return payload;
+    };
+    const jsonOptions = (method, value) => ({method, body: JSON.stringify(value)});
+    const bookPath = suffix => `/v1/books/${state.bootstrap.book.book_id}${suffix}`;
+    const currentChapterId = () => state.chapter?.chapter_id || state.session?.current_location?.chapter_id || state.bootstrap.chapters[0]?.chapter_id;
+    const readerState = () => ({
+      session_id: state.session?.session_id || null,
+      current_location: state.session.current_location,
+      read_until: state.session.read_until,
+      completed_chapter_ids: [],
+      progress_basis_points: state.session.progress_basis_points,
+    });
+
+    async function start() {
+      try {
+        state.bootstrap = await api('/v1/bootstrap');
+        state.session = state.bootstrap.session;
+        if (!state.session) {
+          const first = state.bootstrap.chapters[0];
+          state.session = await api('/v1/reader-sessions', jsonOptions('POST', {
+            book_id: state.bootstrap.book.book_id,
+            current_location: {chapter_id:first.chapter_id, block_id:null, char_offset:null, epub_cfi:null},
+            spoiler_mode: 'read_range',
+          }));
+        }
+        document.querySelector('#header-status').textContent = `${state.bootstrap.book.title} · 已就绪`;
+        addEventListener('hashchange', route);
+        selectionMenu.addEventListener('click', handleSelectionAction);
+        route();
+      } catch (error) {
+        app.innerHTML = `<div class="page"><h1>无法加载阅读器</h1><p class="error">${esc(error.message)}</p></div>`;
+      }
+    }
+
+    function activeRoute() {
+      const route = location.hash.replace(/^#/, '').split('/')[0];
+      return ['home','book','read','report'].includes(route) ? route : 'home';
+    }
+    async function route() {
+      const route = activeRoute();
+      document.querySelectorAll('[data-route]').forEach(link => link.setAttribute('aria-current', link.dataset.route === route ? 'page' : 'false'));
+      selectionMenu.classList.remove('visible');
+      try {
+        if (route === 'home') renderHome();
+        if (route === 'book') renderBook();
+        if (route === 'read') await renderReader(location.hash.split('/')[1] || currentChapterId());
+        if (route === 'report') { state.bootstrap = await api('/v1/bootstrap'); state.session = state.bootstrap.session || state.session; renderReport(); }
+      } catch (error) {
+        app.innerHTML = `<div class="page"><h1>页面加载失败</h1><p class="error">${esc(error.message)}</p></div>`;
+      }
+    }
+
+    function renderHome() {
+      const book = state.bootstrap.book;
+      app.innerHTML = `<section class="page">
+        <div class="eyebrow">Book Agent · ${esc(book.status)}</div>
+        <h1>${esc(book.title)}</h1>
+        <p class="lead">处理完成。继续上次阅读，或先查看全书地图再选择阅读路径。</p>
+        <div class="stats">
+          ${stat('处理状态', '已就绪')}${stat('核心概念', book.concept_count)}${stat('章节复盘', book.checkpoint_count)}${stat('阅读进度', `${Math.round(state.session.progress_basis_points / 100)}%`)}
+        </div>
+        <div class="section"><h2>下一步</h2><p>${esc(nextSuggestion())}</p><div class="button-row"><a class="primary-button" href="#read/${esc(state.session.current_location.chapter_id)}">继续阅读</a><a class="quiet-button" href="#book">查看全书地图</a></div></div>
+      </section>`;
+    }
+    const stat = (label, value) => `<div class="stat"><span class="muted">${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+    const nextSuggestion = () => state.session.progress_basis_points ? `从 ${state.session.current_location.chapter_id} 继续，并在章末完成复盘。` : '先浏览全书地图，然后开始第一章。';
+
+    function renderBook() {
+      const map = state.bootstrap.book_map;
+      const paths = map.reading_paths || [];
+      app.innerHTML = `<section class="page">
+        <div class="eyebrow">Book Map</div><h1>${esc(state.bootstrap.book.title)}</h1>
+        <div class="section"><h2>核心问题</h2><p>${esc(map.central_question)}</p><h2>核心主张</h2><p>${esc(map.thesis)}</p></div>
+        <div class="section"><h2>阅读路径</h2><div class="reading-paths">${paths.map(path => `<div class="path"><h3>${esc(path.title)}</h3><p class="muted">${esc(path.description)}</p><p>${path.chapter_ids.map(id => `<a href="#read/${esc(id)}">${esc(chapterTitle(id))}</a>`).join(' · ')}</p></div>`).join('')}</div></div>
+        <div class="section"><h2>结构与关键章节</h2>${(map.chapter_roles || []).map(role => `<p><strong>${esc(chapterTitle(role.chapter_id))}</strong> · ${esc(role.role)}${role.depends_on_chapter_ids?.length ? `<br><span class="muted">依赖：${role.depends_on_chapter_ids.map(chapterTitle).map(esc).join('、')}</span>` : ''}</p>`).join('')}<p><strong>关键章节：</strong>${(map.key_chapter_ids || []).map(chapterTitle).map(esc).join('、')}</p></div>
+        <div class="section"><h2>难度地图</h2>${(map.difficulty_map || []).map(item => `<p><strong>${esc(chapterTitle(item.chapter_id))}</strong> · ${esc(item.level)}<br><span class="muted">${esc(item.reason)}</span></p>`).join('')}</div>
+      </section>`;
+    }
+    const chapterTitle = id => state.bootstrap.chapters.find(chapter => chapter.chapter_id === id)?.title || id;
+
+    async function renderReader(chapterId) {
+      const [chapter, analysis] = await Promise.all([
+        api(bookPath(`/chapters/${chapterId}/content`)),
+        api(bookPath(`/chapters/${chapterId}/analysis`)).catch(() => null),
+      ]);
+      state.chapter = chapter; state.analysis = analysis; state.cards = [];
+      const blockId = chapter.blocks[0]?.block_id || null;
+      const lastBlock = chapter.blocks[chapter.blocks.length - 1];
+      const chapterIndex = state.bootstrap.chapters.findIndex(item => item.chapter_id === chapterId);
+      const progress = Math.round(((chapterIndex + 1) / state.bootstrap.chapters.length) * 10000);
+      state.session = await api(`/v1/reader-sessions/${state.session.session_id}`, jsonOptions('PATCH', {
+        current_location: {chapter_id:chapterId, block_id:blockId, char_offset:0, epub_cfi:null},
+        read_until: {chapter_id:chapterId, block_id:lastBlock?.block_id || null, char_offset:lastBlock ? Array.from(lastBlock.text).length : null, epub_cfi:null},
+        progress_basis_points: Math.max(state.session.progress_basis_points, progress),
+      }));
+      app.innerHTML = `<div class="reader-shell">
+        <aside class="reader-sidebar" aria-label="阅读导航">${sidebarHtml(chapterId)}</aside>
+        <article class="reader-main"><h1>${esc(chapter.title)}</h1><div id="chapter-blocks">${chapter.blocks.map(blockHtml).join('')}</div><div class="chapter-end" id="chapter-end"><h2>本章结束</h2><p>准备好后，进入复盘循环。</p><button class="primary-button" id="checkpoint-button">开始复盘</button><div id="checkpoint-content"></div></div></article>
+        <aside class="agent-panel" aria-label="Book Agent">${agentPanelHtml()}</aside>
+      </div>`;
+      bindReaderEvents();
+    }
+
+    function sidebarHtml(chapterId) {
+      const progress = state.session.progress_basis_points / 100;
+      return `<div class="sidebar-title">阅读进度 ${Math.round(progress)}%</div><div class="progress-track"><div class="progress-fill" style="width:${progress}%"></div></div>
+        <div class="sidebar-title">目录</div>${state.bootstrap.chapters.map(chapter => `<button class="toc-button" data-chapter="${esc(chapter.chapter_id)}" aria-current="${chapter.chapter_id === chapterId ? 'page':'false'}">${esc(chapter.title)}</button>`).join('')}
+        <div class="sidebar-title">相关概念</div>${state.bootstrap.concepts.slice(0, 20).map(concept => `<button class="concept-button" data-concept="${esc(concept.concept_id)}">${esc(concept.name)}</button>`).join('')}`;
+    }
+    function blockHtml(block) {
+      const highlighted = state.bootstrap.highlights?.some(item => item.block_id === block.block_id);
+      return `<p class="reader-block${highlighted ? ' saved-highlight':''}" id="${esc(block.block_id)}" data-block-id="${esc(block.block_id)}" data-fingerprint="${esc(block.text_fingerprint)}" data-kind="${esc(block.kind)}">${esc(block.text)}</p>`;
+    }
+    function agentPanelHtml() {
+      return `<div class="tabs" role="tablist"><button class="tab-button" data-tab="context" aria-selected="${state.tab === 'context'}">上下文</button><button class="tab-button" data-tab="chat" aria-selected="${state.tab === 'chat'}">Chat</button></div><div id="agent-content">${state.tab === 'context' ? contextHtml() : chatHtml()}</div>`;
+    }
+    function contextHtml() {
+      const summary = state.analysis?.content?.summary;
+      return `<div class="agent-card"><h3>当前章节目标</h3><p>${esc(summary?.one_sentence || '暂无章节目标')}</p></div>
+        <div class="agent-card"><h3>当前章节作用</h3><p>${esc(summary?.role_in_book || '暂无分析')}</p></div>
+        <div class="agent-card"><h3>相关概念</h3><p>${(state.bootstrap.concepts || []).slice(0,4).map(item => esc(item.name)).join(' · ') || '暂无'}</p></div>
+        <div id="agent-cards">${state.cards.map(cardHtml).join('')}</div>`;
+    }
+    function chatHtml() {
+      return `<p class="muted">Chat 只使用当前已读范围，并要求引用来源。</p><form class="chat-form" id="chat-form"><input id="chat-input" aria-label="向本书提问" placeholder="向本书提问"><button class="primary-button">发送</button></form><div id="agent-cards">${state.cards.map(cardHtml).join('')}</div>`;
+    }
+    function cardHtml(card) {
+      const content = card.content || {};
+      const summary = typeof content.summary === 'string' ? content.summary : content.summary?.short;
+      const body = content.explanation || content.answer || content.feedback || summary || '';
+      const details = (content.must_understand?.length ? `<ul>${content.must_understand.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '') + (content.flashcards?.length ? content.flashcards.map(item => `<details><summary>${esc(item.front)}</summary><p>${esc(item.back)}</p></details>`).join('') : '');
+      return `<section class="agent-card"><h3>${esc(card.title)}</h3><p>${esc(body)}</p>${details}${(card.source_refs || []).map(ref => `<button class="source-button" data-source-block="${esc(ref.block_id)}">回到来源 · ${esc(ref.block_id)}</button>`).join('')}<div class="card-meta">${esc(card.grounding)} · ${Math.round((card.confidence_basis_points || 0) / 100)}%</div></section>`;
+    }
+
+    function bindReaderEvents() {
+      document.querySelectorAll('[data-chapter]').forEach(button => button.addEventListener('click', () => location.hash = `#read/${button.dataset.chapter}`));
+      document.querySelectorAll('[data-concept]').forEach(button => button.addEventListener('click', () => showConcept(button.dataset.concept)));
+      document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {state.tab = button.dataset.tab; refreshAgentPanel();}));
+      document.querySelector('#chapter-blocks').addEventListener('mouseup', captureSelection);
+      document.querySelector('#checkpoint-button').addEventListener('click', loadCheckpoint);
+      document.querySelector('.agent-panel').addEventListener('click', handleAgentClick);
+      bindChat();
+      const end = document.querySelector('#chapter-end');
+      new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) end.dataset.visible = 'true'; }, {threshold:.5}).observe(end);
+    }
+    function refreshAgentPanel() { document.querySelector('.agent-panel').innerHTML = agentPanelHtml(); bindReaderEventsAfterAgent(); }
+    function bindReaderEventsAfterAgent() { document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {state.tab = button.dataset.tab; refreshAgentPanel();})); document.querySelector('.agent-panel').addEventListener('click', handleAgentClick); bindChat(); }
+    function bindChat() { const form = document.querySelector('#chat-form'); if (form) form.addEventListener('submit', askBook); }
+
+    function captureSelection() {
+      const selection = getSelection();
+      const text = selection.toString();
+      if (!text.trim() || selection.rangeCount !== 1) return selectionMenu.classList.remove('visible');
+      const range = selection.getRangeAt(0);
+      const block = range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer.closest?.('.reader-block') : range.commonAncestorContainer.parentElement?.closest('.reader-block');
+      if (!block || !block.contains(range.startContainer) || !block.contains(range.endContainer)) return;
+      const prefix = range.cloneRange(); prefix.selectNodeContents(block); prefix.setEnd(range.startContainer, range.startOffset);
+      const start = prefix.toString().length; const end = start + text.length;
+      state.selection = {text, block_id:block.dataset.blockId, text_fingerprint:block.dataset.fingerprint, start_char:start, end_char:end, chapter_id:state.chapter.chapter_id};
+      const rect = range.getBoundingClientRect();
+      selectionMenu.style.left = `${Math.max(10, Math.min(rect.left, innerWidth - selectionMenu.offsetWidth - 10))}px`;
+      selectionMenu.style.top = `${Math.max(58, rect.top - 48)}px`; selectionMenu.classList.add('visible');
+    }
+    async function handleSelectionAction(event) {
+      const intent = event.target.dataset.intent; if (!intent || !state.selection) return;
+      selectionMenu.classList.remove('visible');
+      if (intent === 'highlight') return saveHighlight();
+      if (intent === 'note') return saveNote();
+      if (intent === 'quiz') return loadCheckpoint();
+      await explainSelection(intent);
+    }
+    async function explainSelection(intent) {
+      try {
+        const response = await api(bookPath('/explain'), jsonOptions('POST', {selected_text:state.selection.text, source_ref:{block_id:state.selection.block_id,start_char:state.selection.start_char,end_char:state.selection.end_char,text_fingerprint:state.selection.text_fingerprint}, reader_state:readerState(), spoiler_mode:state.session.spoiler_mode, intent}));
+        state.cards = response.cards; state.tab = 'context'; refreshAgentPanel();
+      } catch (error) { showAgentError(error); }
+    }
+    async function askBook(event) {
+      event.preventDefault(); const input = document.querySelector('#chat-input'); if (!input.value.trim()) return;
+      try { const response = await api(bookPath('/ask'), jsonOptions('POST', {question:input.value, reader_state:readerState(), spoiler_mode:state.session.spoiler_mode})); state.cards = response.cards; refreshAgentPanel(); }
+      catch (error) { showAgentError(error); }
+    }
+    async function saveHighlight() {
+      try { await api(`/v1/reader-sessions/${state.session.session_id}/highlights`, jsonOptions('POST', {chapter_id:state.selection.chapter_id, block_id:state.selection.block_id, start_char:state.selection.start_char, end_char:state.selection.end_char, text:state.selection.text, color:'yellow'})); document.getElementById(state.selection.block_id)?.classList.add('saved-highlight'); }
+      catch (error) { showAgentError(error); }
+    }
+    async function saveNote() {
+      const text = prompt('记录这段内容带来的想法：', state.selection.text); if (!text?.trim()) return;
+      try { await api(`/v1/reader-sessions/${state.session.session_id}/notes`, jsonOptions('POST', {chapter_id:state.selection.chapter_id, block_id:state.selection.block_id, text})); }
+      catch (error) { showAgentError(error); }
+    }
+    function showConcept(id) { const concept = state.bootstrap.concepts.find(item => item.concept_id === id); if (!concept) return; state.cards = [{title:concept.name, content:{answer:concept.definition_in_this_book}, source_refs:concept.appearances, grounding:concept.grounding, confidence_basis_points:8000}]; state.tab='context'; refreshAgentPanel(); }
+    function handleAgentClick(event) { const blockId = event.target.dataset.sourceBlock; if (blockId) document.getElementById(blockId)?.scrollIntoView({block:'center'}); }
+    function showAgentError(error) { state.cards = [{title:'操作失败',content:{answer:error.message},source_refs:[],grounding:'inferred',confidence_basis_points:0}]; refreshAgentPanel(); }
+
+    async function loadCheckpoint() {
+      try {
+        const response = await api(bookPath(`/chapters/${state.chapter.chapter_id}/checkpoint`), jsonOptions('POST', {reader_state:readerState(),spoiler_mode:state.session.spoiler_mode}));
+        state.cards = response.cards; state.tab = 'context'; refreshAgentPanel();
+        const checkpoint = response.cards[0].content; const target = document.querySelector('#checkpoint-content');
+        target.innerHTML = `<h3>讲了什么</h3><p>${esc(checkpoint.summary)}</p><h3>必须理解</h3><ul>${checkpoint.must_understand.map(item => `<li>${esc(item)}</li>`).join('')}</ul>${checkpoint.recall_questions.map(question => `<div class="checkpoint-question"><p>${esc(question.prompt)}</p><textarea data-answer="${esc(question.question_id)}"></textarea><button class="primary-button" data-reflect="${esc(question.question_id)}" data-checkpoint="${esc(checkpoint.checkpoint_id)}">提交复述</button></div>`).join('')}<h3>复习卡片</h3>${checkpoint.flashcards.map(card => `<details><summary>${esc(card.front)}</summary><p>${esc(card.back)}</p></details>`).join('')}<div id="reflection-result"></div>`;
+        target.querySelectorAll('[data-reflect]').forEach(button => button.addEventListener('click', submitReflection));
+      } catch (error) { document.querySelector('#checkpoint-content').innerHTML = `<p class="error">${esc(error.message)}</p>`; }
+    }
+    async function submitReflection(event) {
+      const button = event.currentTarget; const answer = document.querySelector(`[data-answer="${CSS.escape(button.dataset.reflect)}"]`).value;
+      try { const response = await api(bookPath(`/chapters/${state.chapter.chapter_id}/reflect`), jsonOptions('POST', {checkpoint_id:button.dataset.checkpoint,question_id:button.dataset.reflect,answer,reader_state:readerState()})); document.querySelector('#reflection-result').innerHTML = cardHtml(response.cards[0]); }
+      catch (error) { document.querySelector('#reflection-result').innerHTML = `<p class="error">${esc(error.message)}</p>`; }
+    }
+
+    function renderReport() {
+      const reflections = state.bootstrap.reflections || []; const notes = state.bootstrap.notes || []; const highlights = state.bootstrap.highlights || [];
+      app.innerHTML = `<section class="page"><div class="eyebrow">Post-book Report</div><h1>我的阅读报告</h1><div class="stats">${stat('阅读进度',`${Math.round(state.session.progress_basis_points/100)}%`)}${stat('高亮',highlights.length)}${stat('笔记',notes.length)}${stat('复述',reflections.length)}</div>
+        <div class="section"><h2>已理解内容</h2>${reflections.length ? reflections.map(item => `<p>${esc(chapterTitle(item.chapter_id))} · ${Math.round(item.score_basis_points/100)}% · ${esc(item.feedback)}</p>`).join('') : '<p class="empty">完成章节复盘后显示。</p>'}</div>
+        <div class="section"><h2>高亮主题</h2>${highlights.length ? highlights.map(item => `<blockquote>${esc(item.text)}</blockquote>`).join('') : '<p class="empty">暂无高亮。</p>'}</div>
+        <div class="section"><h2>未掌握概念</h2>${state.bootstrap.unmastered_concepts?.length ? state.bootstrap.unmastered_concepts.map(item => `<p>${esc(item.name)}</p>`).join('') : '<p class="empty">暂无已识别的薄弱概念。</p>'}</div>
+        <div class="section"><h2>论点链</h2>${state.bootstrap.book.claim_count ? `<p>已提取 ${state.bootstrap.book.claim_count} 条论点。前往全书地图查看结构。</p>` : '<p class="empty">暂无论点。</p>'}</div>
+        <div class="section"><h2>导出</h2><p><label>范围 <select id="export-scope"><option value="whole_book">全书</option><option value="chapters">当前章节</option><option value="read_range">已读部分</option></select></label></p><div class="button-row"><button class="quiet-button" data-export="json">JSON 包</button><button class="quiet-button" data-export="markdown">Markdown 笔记</button><button class="quiet-button" data-export="obsidian">Obsidian 文件夹</button></div><p id="export-result" class="muted"></p></div></section>`;
+      document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', exportBook));
+    }
+    async function exportBook(event) {
+      const format = event.currentTarget.dataset.export; const target = document.querySelector('#export-result'); target.textContent = '正在生成…';
+      const scope = document.querySelector('#export-scope').value; const chapterIds = scope === 'chapters' ? [currentChapterId()] : [];
+      try { const result = await api(bookPath('/exports'), jsonOptions('POST', {format,scope,chapter_ids:chapterIds,session_id:state.session.session_id})); if (result.href) { const link=document.createElement('a'); link.href=result.href; link.textContent=`下载 ${result.file_name}`; link.download=result.file_name; target.replaceChildren(link); } else target.textContent=`已生成：${result.local_path}`; }
+      catch (error) { target.textContent=error.message; target.classList.add('error'); }
+    }
+    start();
+  </script>
+</body>
+</html>

@@ -101,6 +101,9 @@ fn compile_runs_the_full_book_analysis_pipeline_and_reuses_its_cache() {
     let script = r#"#!/bin/sh
 request=$(cat)
 case "$request" in
+  *'"task":"explain_passage"'*)
+    printf '%s' '{"cards":[{"card_type":"explanation","card_id":"agent-explanation","title":"Agent explanation","content":{"explanation":"Grounded by the supplied runtime context."},"source_refs":[],"confidence_basis_points":7000,"grounding":"inferred","spoiler_status":"within_boundary","follow_up_actions":[]}]}'
+    ;;
   *'"task":"book_synthesis"'*)
     printf '%s' '{"book_map":{"central_question":"What makes a deterministic fixture?","thesis":"Stable inputs produce stable outputs.","chapter_roles":[{"chapter_id":"chapter_001","role":"Introduces the fixture.","depends_on_chapter_ids":[]}],"reading_paths":[{"path_id":"deep","kind":"deep","title":"Deep","description":"Read all details.","chapter_ids":["chapter_001"]},{"path_id":"fast","kind":"fast","title":"Fast","description":"Read the key chapter.","chapter_ids":["chapter_001"]},{"path_id":"selective","kind":"selective","title":"Selective","description":"Inspect the fixture.","chapter_ids":["chapter_001"]}],"difficulty_map":[{"chapter_id":"chapter_001","level":"introductory","reason":"Short fixture."}],"key_chapter_ids":["chapter_001"]},"concepts":[],"claims":[],"entities":[],"checkpoints":[{"checkpoint_id":"checkpoint_001","chapter_id":"chapter_001","summary":"The fixture is deterministic.","must_understand":["Stable input","Stable parse","Stable output"],"recall_questions":[{"question_id":"recall_001","prompt":"What is stable?","expected_points":["Input and output"]}],"reflection_questions":[{"question_id":"reflection_001","prompt":"Why does stability matter?","expected_points":["Repeatability"]}],"flashcards":[{"flashcard_id":"flashcard_001","front":"Determinism","back":"Stable input produces stable output.","concept_ids":[]}],"source_refs":[],"grounding":"inferred"}],"book_reflection_questions":[{"question_id":"book_reflection_001","prompt":"How would you test determinism?","expected_points":["Repeat the compile"]}]}'
     ;;
@@ -178,6 +181,130 @@ esac
     ]);
     assert_success(&cached_output);
     assert!(stderr(&cached_output).contains("Reused cached package"));
+
+    let runtime = codexia::web_runtime::WebRuntime::load(
+        &package,
+        workspace.path.join("runtime-state"),
+        Some(analyzer.clone()),
+    )
+    .expect("load Web Runtime");
+    let page = runtime.dispatch("GET", "/", &[]);
+    assert_eq!(page.status(), 200);
+    assert!(page.content_type().starts_with("text/html"));
+    assert!(String::from_utf8_lossy(page.body()).contains("reader-shell"));
+
+    let bootstrap = response_json(runtime.dispatch("GET", "/v1/bootstrap", &[]));
+    let book_id = bootstrap["book"]["book_id"].as_str().expect("book id");
+    let session = response_json(runtime.dispatch(
+        "POST",
+        "/v1/reader-sessions",
+        r#"{"book_id":"__BOOK__","current_location":{"chapter_id":"chapter_001","block_id":null,"char_offset":null,"epub_cfi":null},"spoiler_mode":"read_range"}"#
+            .replace("__BOOK__", book_id)
+            .as_bytes(),
+    ));
+    let session_id = session["session_id"].as_str().expect("session id");
+    let chapter = response_json(runtime.dispatch(
+        "GET",
+        &format!("/v1/books/{book_id}/chapters/chapter_001/content"),
+        &[],
+    ));
+    let block = chapter["blocks"]
+        .as_array()
+        .and_then(|blocks| blocks.last())
+        .expect("chapter block");
+    let block_id = block["block_id"].as_str().expect("block id");
+    let block_text = block["text"].as_str().expect("block text");
+    let fingerprint = block["text_fingerprint"].as_str().expect("fingerprint");
+    let updated_session = response_json(runtime.dispatch(
+        "PATCH",
+        &format!("/v1/reader-sessions/{session_id}"),
+        &serde_json::to_vec(&serde_json::json!({
+            "current_location": {"chapter_id":"chapter_001","block_id":block_id,"char_offset":0,"epub_cfi":null},
+            "read_until": {"chapter_id":"chapter_001","block_id":block_id,"char_offset":block_text.chars().count(),"epub_cfi":null},
+            "progress_basis_points": 10_000,
+        }))
+        .expect("serialize session patch"),
+    ));
+    let explain_body = serde_json::json!({
+        "selected_text": block_text,
+        "source_ref": {
+            "block_id": block_id,
+            "start_char": 0,
+            "end_char": block_text.chars().count(),
+            "text_fingerprint": fingerprint,
+        },
+        "reader_state": {
+            "session_id": session_id,
+            "current_location": updated_session["current_location"].clone(),
+            "read_until": updated_session["read_until"].clone(),
+            "completed_chapter_ids": [],
+            "progress_basis_points": updated_session["progress_basis_points"].clone(),
+        },
+        "spoiler_mode": "read_range",
+        "intent": "explain",
+    });
+    let first_block_id = chapter["blocks"][0]["block_id"]
+        .as_str()
+        .expect("first block id");
+    let mut blocked_body = explain_body.clone();
+    blocked_body["reader_state"]["session_id"] = Value::Null;
+    blocked_body["reader_state"]["read_until"]["block_id"] = Value::from(first_block_id);
+    blocked_body["reader_state"]["read_until"]["char_offset"] = Value::from(0);
+    let blocked = runtime.dispatch(
+        "POST",
+        &format!("/v1/books/{book_id}/explain"),
+        &serde_json::to_vec(&blocked_body).expect("serialize blocked explain"),
+    );
+    assert_eq!(blocked.status(), 403);
+    assert!(String::from_utf8_lossy(blocked.body()).contains("spoiler_boundary"));
+
+    let explain = response_json(runtime.dispatch(
+        "POST",
+        &format!("/v1/books/{book_id}/explain"),
+        &serde_json::to_vec(&explain_body).expect("serialize explain"),
+    ));
+    assert_eq!(explain["cards"][0]["card_type"], "explanation");
+    assert_eq!(explain["cards"][0]["title"], "Agent explanation");
+
+    let checkpoint_body = serde_json::json!({
+        "reader_state": explain_body["reader_state"].clone(),
+        "spoiler_mode": "read_range",
+    });
+    let checkpoint = response_json(runtime.dispatch(
+        "POST",
+        &format!("/v1/books/{book_id}/chapters/chapter_001/checkpoint"),
+        &serde_json::to_vec(&checkpoint_body).expect("serialize checkpoint"),
+    ));
+    assert_eq!(checkpoint["cards"][0]["card_type"], "checkpoint");
+
+    let note = response_json(
+        runtime.dispatch(
+            "POST",
+            &format!("/v1/reader-sessions/{session_id}/notes"),
+            &serde_json::to_vec(&serde_json::json!({
+                "chapter_id": "chapter_001",
+                "block_id": block_id,
+                "text": "A saved note",
+            }))
+            .expect("serialize note"),
+        ),
+    );
+    assert_eq!(note["text"], "A saved note");
+
+    let export = response_json(
+        runtime.dispatch(
+            "POST",
+            &format!("/v1/books/{book_id}/exports"),
+            &serde_json::to_vec(&serde_json::json!({
+                "format": "markdown",
+                "scope": "whole_book",
+                "chapter_ids": [],
+                "session_id": session_id,
+            }))
+            .expect("serialize export"),
+        ),
+    );
+    assert!(Path::new(export["local_path"].as_str().expect("export path")).is_file());
 
     let book_map_path = package.join("book_map.json");
     let mut book_map: Value =
@@ -262,6 +389,15 @@ fn assert_success(output: &Output) {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn response_json(response: codexia::web_runtime::HttpResponse) -> Value {
+    assert!(
+        (200..300).contains(&response.status()),
+        "runtime response failed: {}",
+        String::from_utf8_lossy(response.body())
+    );
+    serde_json::from_slice(response.body()).expect("parse runtime response")
 }
 
 fn path_text(path: &Path) -> &str {

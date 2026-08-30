@@ -1,10 +1,12 @@
 //! Runtime API contract v1.
 //!
 //! The module is HTTP-framework neutral. It defines the public routes, their
-//! request/response schemas, and the reader-state contracts needed by a future
-//! server implementation.
+//! request/response schemas, and the reader-state contracts used by the local
+//! Web Reader runtime.
 
 use std::collections::BTreeSet;
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ir::{Profile, SourceRef},
@@ -437,7 +439,7 @@ pub struct BookPackage {
 }
 
 /// Location tracked by reader state and spoiler boundaries.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReaderLocation {
     pub chapter_id: String,
     pub block_id: Option<String>,
@@ -446,7 +448,7 @@ pub struct ReaderLocation {
 }
 
 /// Client reading state sent with contextual agent actions.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReaderState {
     pub session_id: Option<String>,
     pub current_location: ReaderLocation,
@@ -468,7 +470,8 @@ impl ReaderState {
 }
 
 /// Policy for using content beyond the reader's current position.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SpoilerMode {
     /// Use only content at or before `read_until`.
     ReadRange,
@@ -479,7 +482,7 @@ pub enum SpoilerMode {
 }
 
 /// Effective boundary applied to an agent response.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SpoilerBoundary {
     pub mode: SpoilerMode,
     pub read_until: Option<ReaderLocation>,
@@ -551,7 +554,7 @@ impl ReflectRequest {
 }
 
 /// Create a persistent reader session.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CreateReaderSessionRequest {
     pub book_id: String,
     pub current_location: ReaderLocation,
@@ -569,7 +572,7 @@ impl CreateReaderSessionRequest {
 }
 
 /// Patch only the reader-session fields supplied by the client.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UpdateReaderSessionRequest {
     pub current_location: Option<ReaderLocation>,
     pub read_until: Option<ReaderLocation>,
@@ -600,7 +603,7 @@ impl UpdateReaderSessionRequest {
 }
 
 /// Persisted reader session returned after create or update.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReaderSession {
     pub session_id: String,
     pub book_id: String,
