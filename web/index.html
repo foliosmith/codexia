@@ -141,6 +141,7 @@
     <button data-intent="simplify">简化</button>
     <button data-intent="importance">为什么重要</button>
     <button data-intent="connect">连接前文</button>
+    <button data-intent="read">已读至此</button>
     <button data-intent="concept">提取概念</button>
     <button data-intent="note">生成笔记</button>
     <button data-intent="quiz">考考我</button>
@@ -166,7 +167,8 @@
       session_id: state.session?.session_id || null,
       current_location: state.session.current_location,
       read_until: state.session.read_until,
-      completed_chapter_ids: [],
+      completed_chapter_ids: state.session.completed_chapter_ids || [],
+      read_coverage: state.session.read_coverage || [],
       progress_basis_points: state.session.progress_basis_points,
     });
 
@@ -244,29 +246,25 @@
       ]);
       state.chapter = chapter; state.analysis = analysis; state.cards = [];
       const blockId = chapter.blocks[0]?.block_id || null;
-      const lastBlock = chapter.blocks[chapter.blocks.length - 1];
-      const chapterIndex = state.bootstrap.chapters.findIndex(item => item.chapter_id === chapterId);
-      const progress = Math.round(((chapterIndex + 1) / state.bootstrap.chapters.length) * 10000);
       state.session = await api(`/v1/reader-sessions/${state.session.session_id}`, jsonOptions('PATCH', {
-        current_location: {chapter_id:chapterId, block_id:blockId, char_offset:0, epub_cfi:null},
-        read_until: {chapter_id:chapterId, block_id:lastBlock?.block_id || null, char_offset:lastBlock ? Array.from(lastBlock.text).length : null, epub_cfi:null},
-        progress_basis_points: Math.max(state.session.progress_basis_points, progress),
+        current_location: state.session.current_location.chapter_id === chapterId ? state.session.current_location : {chapter_id:chapterId, block_id:blockId, char_offset:0, epub_cfi:null},
       }));
       document.body.dataset.codexiaBookId = state.bootstrap.book.book_id;
       document.body.dataset.codexiaReaderState = JSON.stringify(readerState());
       app.innerHTML = `<div class="reader-shell">
         <aside class="reader-sidebar" aria-label="阅读导航">${sidebarHtml(chapterId)}</aside>
-        <article class="reader-main"><h1>${esc(chapter.title)}</h1><div id="chapter-blocks">${chapter.blocks.map(blockHtml).join('')}</div><div class="chapter-end" id="chapter-end"><h2>本章结束</h2><p>准备好后，进入复盘循环。</p><button class="primary-button" id="checkpoint-button">开始复盘</button><div id="checkpoint-content"></div></div></article>
+        <article class="reader-main"><h1>${esc(chapter.title)}</h1><div id="chapter-blocks">${chapter.blocks.map(blockHtml).join('')}</div><div class="chapter-end" id="chapter-end"><h2>本章结束</h2><p>准备好后，进入复盘循环。</p><button class="quiet-button" id="mark-chapter-read">确认本章已读</button><button class="primary-button" id="checkpoint-button" ${chapterRead() ? "" : "disabled"}>开始复盘</button><div id="checkpoint-content"></div></div></article>
         <aside class="agent-panel" aria-label="Book Agent">${agentPanelHtml()}</aside>
       </div>`;
       bindReaderEvents();
+      document.getElementById(state.session.current_location.block_id)?.scrollIntoView({block:"start"});
     }
 
     function sidebarHtml(chapterId) {
       const progress = state.session.progress_basis_points / 100;
       return `<div class="sidebar-title">阅读进度 ${Math.round(progress)}%</div><div class="progress-track"><div class="progress-fill" style="width:${progress}%"></div></div>
         <div class="sidebar-title">目录</div>${state.bootstrap.chapters.map(chapter => `<button class="toc-button" data-chapter="${esc(chapter.chapter_id)}" aria-current="${chapter.chapter_id === chapterId ? 'page':'false'}">${esc(chapter.title)}</button>`).join('')}
-        <div class="sidebar-title">相关概念</div>${state.bootstrap.concepts.slice(0, 20).map(concept => `<button class="concept-button" data-concept="${esc(concept.concept_id)}">${esc(concept.name)}</button>`).join('')}`;
+        <div class="sidebar-title">相关概念</div>${visibleConcepts().slice(0, 20).map(concept => `<button class="concept-button" data-concept="${esc(concept.concept_id)}">${esc(concept.name)}</button>`).join('')}`;
     }
     function blockHtml(block) {
       const highlighted = state.bootstrap.highlights?.some(item => item.block_id === block.block_id);
@@ -276,10 +274,10 @@
       return `<div class="tabs" role="tablist"><button class="tab-button" data-tab="context" aria-selected="${state.tab === 'context'}">上下文</button><button class="tab-button" data-tab="chat" aria-selected="${state.tab === 'chat'}">Chat</button></div><div id="agent-content">${state.tab === 'context' ? contextHtml() : chatHtml()}</div>`;
     }
     function contextHtml() {
-      const summary = state.analysis?.content?.summary;
+      const summary = chapterRead() ? state.analysis?.content?.summary : null;
       return `<div class="agent-card"><h3>当前章节目标</h3><p>${esc(summary?.one_sentence || '暂无章节目标')}</p></div>
         <div class="agent-card"><h3>当前章节作用</h3><p>${esc(summary?.role_in_book || '暂无分析')}</p></div>
-        <div class="agent-card"><h3>相关概念</h3><p>${(state.bootstrap.concepts || []).slice(0,4).map(item => esc(item.name)).join(' · ') || '暂无'}</p></div>
+        <div class="agent-card"><h3>相关概念</h3><p>${visibleConcepts().slice(0,4).map(item => esc(item.name)).join(' · ') || '暂无'}</p></div>
         <div id="agent-cards">${state.cards.map(cardHtml).join('')}</div>`;
     }
     function chatHtml() {
@@ -298,11 +296,14 @@
       document.querySelectorAll('[data-concept]').forEach(button => button.addEventListener('click', () => showConcept(button.dataset.concept)));
       document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {state.tab = button.dataset.tab; refreshAgentPanel();}));
       document.querySelector('#chapter-blocks').addEventListener('mouseup', captureSelection);
+      document.querySelector('#mark-chapter-read').addEventListener('click', () => markRead(state.chapter.blocks.at(-1)));
       document.querySelector('#checkpoint-button').addEventListener('click', loadCheckpoint);
       document.querySelector('.agent-panel').addEventListener('click', handleAgentClick);
       bindChat();
       const end = document.querySelector('#chapter-end');
-      new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) end.dataset.visible = 'true'; }, {threshold:.5}).observe(end);
+      state.endObserver?.disconnect();
+      state.endObserver = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) end.dataset.visible = 'true'; }, {threshold:.5});
+      state.endObserver.observe(end);
     }
     function refreshAgentPanel() { document.querySelector('.agent-panel').innerHTML = agentPanelHtml(); bindReaderEventsAfterAgent(); }
     function bindReaderEventsAfterAgent() { document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {state.tab = button.dataset.tab; refreshAgentPanel();})); document.querySelector('.agent-panel').addEventListener('click', handleAgentClick); bindChat(); }
@@ -325,10 +326,33 @@
     async function handleSelectionAction(event) {
       const intent = event.target.dataset.intent; if (!intent || !state.selection) return;
       selectionMenu.classList.remove('visible');
+      if (intent === 'read') return markRead(state.chapter.blocks.find(block => block.block_id === state.selection.block_id), state.selection.end_char);
       if (intent === 'highlight') return saveHighlight();
       if (intent === 'note') return saveNote();
       if (intent === 'quiz') return loadCheckpoint();
       await explainSelection(intent);
+    }
+    const chapterRead = () => (state.session.completed_chapter_ids || []).includes(state.chapter?.chapter_id);
+    function visibleConcepts() {
+      const limit = state.session.read_coverage?.find(location => location.chapter_id === state.chapter?.chapter_id);
+      const limitIndex = state.chapter?.blocks.findIndex(block => block.block_id === limit?.block_id) ?? -1;
+      return (state.bootstrap.concepts || []).filter(concept => concept.appearances.length && concept.appearances.every(ref => {
+        const index = state.chapter?.blocks.findIndex(block => block.block_id === ref.block_id) ?? -1;
+        return index >= 0 && (index < limitIndex || (index === limitIndex && ref.end_char <= limit.char_offset));
+      }));
+    }
+    async function markRead(block, offset = block ? Array.from(block.text).length : 0) {
+      if (!block) return;
+      try {
+        const location = {chapter_id:state.chapter.chapter_id,block_id:block.block_id,char_offset:offset,epub_cfi:null};
+        state.session = await api(`/v1/reader-sessions/${state.session.session_id}`, jsonOptions('PATCH', {current_location:location,read_until:location}));
+        document.body.dataset.codexiaReaderState = JSON.stringify(readerState());
+        document.querySelector('#checkpoint-button').disabled = !chapterRead();
+        const percent = state.session.progress_basis_points / 100;
+        document.querySelector('.progress-fill').style.width = `${percent}%`;
+        document.querySelector('.reader-sidebar .sidebar-title').textContent = `阅读进度 ${Math.round(percent)}%`;
+        refreshAgentPanel();
+      } catch (error) { showAgentError(error); }
     }
     async function explainSelection(intent) {
       try {
@@ -350,7 +374,7 @@
       try { await api(`/v1/reader-sessions/${state.session.session_id}/notes`, jsonOptions('POST', {chapter_id:state.selection.chapter_id, block_id:state.selection.block_id, text})); }
       catch (error) { showAgentError(error); }
     }
-    function showConcept(id) { const concept = state.bootstrap.concepts.find(item => item.concept_id === id); if (!concept) return; state.cards = [{title:concept.name, content:{answer:concept.definition_in_this_book}, source_refs:concept.appearances, grounding:concept.grounding, confidence_basis_points:8000}]; state.tab='context'; refreshAgentPanel(); }
+    function showConcept(id) { const concept = visibleConcepts().find(item => item.concept_id === id); if (!concept) return; state.cards = [{title:concept.name, content:{answer:concept.definition_in_this_book}, source_refs:concept.appearances, grounding:concept.grounding, confidence_basis_points:8000}]; state.tab='context'; refreshAgentPanel(); }
     function handleAgentClick(event) { const blockId = event.target.dataset.sourceBlock; if (blockId) document.getElementById(blockId)?.scrollIntoView({block:'center'}); }
     function showAgentError(error) { state.cards = [{title:'操作失败',content:{answer:error.message},source_refs:[],grounding:'inferred',confidence_basis_points:0}]; refreshAgentPanel(); }
 

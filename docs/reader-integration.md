@@ -9,8 +9,25 @@ Bearer …`.
 ## 2. Create a reader session
 
 Create a session with the first visible `chapter_id`. Persist the returned
-`session_id` and send session updates as the reader moves. `read_until` is
-monotonic and is the trust boundary used by contextual actions.
+`session_id`. Navigation updates `current_location` only. An explicit reading
+confirmation PATCHes `read_until` with a block ID and Unicode-scalar character
+endpoint: it confirms the prefix of that chapter, never intervening chapters.
+The server merges each chapter's endpoint monotonically into `read_coverage`
+and derives `completed_chapter_ids` and progress from it. Client-supplied progress
+is not used to grant coverage. The returned `read_until` remains a compatibility
+high-water location; contextual authorization uses persisted coverage.
+
+Send the returned locations, progress and coverage with each action. Sessions
+saved before coverage existed start with empty coverage and require reading
+confirmation again; opening or restoring a location grants no reading access.
+Stateless legacy requests without coverage declare only the prefix of their
+`read_until` chapter. `current_chapter` explicitly permits only the current
+chapter; `full_book` explicitly permits the whole book.
+
+The reference Reader uses “已读至此” on a selection and “确认本章已读” at chapter
+end. A scroll or chapter jump does not mark content read. Chapter summaries and
+checkpoints require full chapter coverage in read-range mode. Read-range exports
+include completed chapters only; partial chapters are omitted.
 
 ## 3. Render the package
 

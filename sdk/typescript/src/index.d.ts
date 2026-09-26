@@ -22,6 +22,7 @@ export interface ReaderState {
   current_location: ReaderLocation;
   read_until: ReaderLocation;
   completed_chapter_ids: string[];
+  read_coverage?: ReaderLocation[];
   progress_basis_points: number;
 }
 
@@ -53,6 +54,7 @@ export interface ReaderCardResponse<TCard extends ReaderCard = ReaderCard> {
     mode: SpoilerMode;
     read_until?: ReaderLocation | null;
     excluded_chapter_ids: string[];
+    read_coverage: ReaderLocation[];
   };
 }
 

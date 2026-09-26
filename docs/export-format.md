@@ -15,7 +15,8 @@ Exports are created with `POST /v1/books/{book_id}/exports`.
 
 - `whole_book`: every readable chapter;
 - `chapters`: exactly the supplied `chapter_ids`;
-- `read_range`: chapters through the persisted session's `read_until`.
+- `read_range`: only chapters fully covered by the persisted session's
+  `read_coverage`; skipped and partially read chapters are excluded.
 
 ## JSON
 

@@ -453,6 +453,8 @@ pub struct ReaderState {
     pub session_id: Option<String>,
     pub current_location: ReaderLocation,
     pub read_until: ReaderLocation,
+    #[serde(default)]
+    pub read_coverage: Vec<ReaderLocation>,
     pub completed_chapter_ids: Vec<String>,
     pub progress_basis_points: u16,
 }
@@ -473,9 +475,9 @@ impl ReaderState {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpoilerMode {
-    /// Use only content at or before `read_until`.
+    /// Use only explicitly recorded chapter prefixes.
     ReadRange,
-    /// Allow the complete current chapter, but no later chapters.
+    /// Explicitly allow the complete current chapter only.
     CurrentChapter,
     /// Allow the whole book when explicitly requested by the reader.
     FullBook,
@@ -487,6 +489,8 @@ pub struct SpoilerBoundary {
     pub mode: SpoilerMode,
     pub read_until: Option<ReaderLocation>,
     pub excluded_chapter_ids: Vec<String>,
+    #[serde(default)]
+    pub read_coverage: Vec<ReaderLocation>,
 }
 
 /// Request for a grounded passage explanation.
@@ -612,6 +616,10 @@ pub struct ReaderSession {
     pub progress_basis_points: u16,
     pub spoiler_mode: SpoilerMode,
     pub revision: u64,
+    #[serde(default)]
+    pub read_coverage: Vec<ReaderLocation>,
+    #[serde(default)]
+    pub completed_chapter_ids: Vec<String>,
 }
 
 /// Common response for explain, ask, checkpoint, and reflect actions.
@@ -672,6 +680,7 @@ mod tests {
             session_id: Some("session-1".to_owned()),
             current_location: location("chapter-2"),
             read_until: location("chapter-2"),
+            read_coverage: Vec::new(),
             completed_chapter_ids: vec!["chapter-1".to_owned()],
             progress_basis_points: 2_500,
         }

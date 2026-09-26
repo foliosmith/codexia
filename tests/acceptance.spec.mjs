@@ -96,6 +96,7 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     const location = { chapter_id: first, block_id: block.block_id, char_offset: 0, epub_cfi: null };
     const created = await api("/v1/reader-sessions", "POST", { book_id: bookId, current_location: location, spoiler_mode: "read_range" }, 201);
     const earlyExport = await api(`${bookPath}/exports`, "POST", { format: "json", scope: "whole_book", chapter_ids: [], session_id: created.session_id }, 201);
+    expect(created.read_coverage).toEqual([]);
     const session = await api(`/v1/reader-sessions/${created.session_id}`, "PATCH", {
       current_location: location,
       read_until: { ...location, char_offset: Array.from(block.text).length },
@@ -179,13 +180,21 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     await api("/v1/reader-sessions/session-00000001", "PATCH", { progress_basis_points: 9999 }, 409);
     await api("/v1/exports/export-00000002", "GET", undefined, 409);
 
-    await start(["serve", packageDir, "--state-dir", join(root, "reader-state"), "--bind", "127.0.0.1:18788", "--agent-command", fixture], `${readerUrl}/v1/bootstrap`);
+    let readerServer = await start(["serve", packageDir, "--state-dir", join(root, "reader-state"), "--bind", "127.0.0.1:18788", "--agent-command", fixture], `${readerUrl}/v1/bootstrap`);
     const reanalyzed = await fetch(`${readerUrl}/v1/studio/chapters/${second}/reanalyze`, { method: "POST", body: JSON.stringify({ analyzer_label: "strict-provider-v2" }) });
     expect(reanalyzed.status, await reanalyzed.text()).toBe(200);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(`${readerUrl}/#read/${second}`);
+    const lastChapter = chapterId(chapters.at(-1));
+    await page.goto(`${readerUrl}/#read/${lastChapter}`);
     await expect(page.locator(".reader-main")).toBeVisible();
+    let browserState = await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState));
+    expect(browserState.progress_basis_points).toBe(0);
+    expect(browserState.read_coverage).toEqual([]);
+    await page.locator(`[data-chapter="${first}"]`).click();
+    await expect(page.locator(`[data-chapter="${first}"]`)).toHaveAttribute("aria-current", "page");
+    await page.locator(`[data-chapter="${second}"]`).click();
+    await expect(page.locator(`[data-chapter="${second}"]`)).toHaveAttribute("aria-current", "page");
     const paragraph = page.locator(".reader-block").filter({ hasText: /Alice/ }).first();
     const selected = await paragraph.evaluate((element) => {
       const node = element.firstChild;
@@ -199,6 +208,30 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
       element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
       return { text: "Alice", start: Array.from(text.slice(0, start)).length, block_id: element.dataset.blockId };
     });
+    await page.locator('#selection-menu [data-intent="read"]').click();
+    await expect.poll(async () => (await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState))).read_coverage.length).toBe(1);
+    browserState = await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState));
+    const boundaryAsk = await fetch(`${readerUrl}${bookPath}/ask`, {method:"POST",body:JSON.stringify({question:"What have I read?",reader_state:browserState,spoiler_mode:"read_range"})});
+    expect(boundaryAsk.status).toBe(200);
+    const scoped = JSON.parse(readFileSync(contextFile, "utf8"));
+    expect(scoped.context.allowed_chapter_ids).toEqual([second]);
+    expect(scoped.context.chapter_analysis).toBeNull();
+    expect(scoped.spoiler_boundary.excluded_chapter_ids).toContain(first);
+    const premature = await fetch(`${readerUrl}${bookPath}/chapters/${second}/checkpoint`, {method:"POST",body:JSON.stringify({reader_state:browserState,spoiler_mode:"read_range"})});
+    expect(premature.status).toBe(403);
+    const skippedExplanation = await fetch(`${readerUrl}${bookPath}/explain`, {method:"POST",body:JSON.stringify({selected_text:block.text,source_ref:source,reader_state:browserState,spoiler_mode:"read_range"})});
+    expect(skippedExplanation.status).toBe(403);
+    const invalidOffset = await fetch(`${readerUrl}/v1/reader-sessions/${browserState.session_id}`, {method:"PATCH",body:JSON.stringify({read_until:{...browserState.read_coverage[0],char_offset:2147483647}})});
+    expect(invalidOffset.status).toBe(400);
+    const partialExport = await fetch(`${readerUrl}${bookPath}/exports`, {method:"POST",body:JSON.stringify({format:"json",scope:"read_range",chapter_ids:[],session_id:browserState.session_id})});
+    expect(partialExport.status).toBe(201);
+    expect(JSON.parse(readFileSync((await partialExport.json()).local_path,"utf8")).chapters).toEqual([]);
+    await paragraph.evaluate((element, selected) => {
+      const node = element.firstChild; const start = node.textContent.indexOf(selected.text);
+      const range = document.createRange(); range.setStart(node, start); range.setEnd(node, start + selected.text.length);
+      getSelection().removeAllRanges(); getSelection().addRange(range);
+      element.dispatchEvent(new MouseEvent("mouseup", {bubbles:true}));
+    }, selected);
     const explainRequest = page.waitForRequest((request) => request.url().endsWith("/explain"));
     await page.locator('#selection-menu [data-intent="explain"]').click();
     const payload = (await explainRequest).postDataJSON();
@@ -210,16 +243,32 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     await expect(page.locator("#chapter-end")).toHaveAttribute("data-visible", "true");
     await page.locator(".source-button").first().click();
     await expect(page.locator(`[id="${selected.block_id}"]`)).toBeInViewport();
+    await page.locator("#mark-chapter-read").click();
+    await expect(page.locator("#checkpoint-button")).toBeEnabled();
     await page.locator("#checkpoint-button").click();
     await expect(page.locator(".checkpoint-question").first()).toBeVisible();
     await page.locator(".checkpoint-question textarea").first().fill("Yes, this chapter was registered.");
     await page.locator("[data-reflect]").first().click();
     await expect(page.locator("#reflection-result .agent-card")).toBeVisible();
+    await stop(readerServer);
+    readerServer = await start(["serve", packageDir, "--state-dir", join(root, "reader-state"), "--bind", "127.0.0.1:18788", "--agent-command", fixture], `${readerUrl}/v1/bootstrap`);
     await page.reload();
     await expect(page.locator(".reader-main")).toBeVisible();
     const persisted = await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState));
     expect(persisted.current_location.chapter_id).toBe(second);
     expect(persisted.progress_basis_points).toBeGreaterThan(0);
+    expect(persisted.completed_chapter_ids).toEqual([second]);
+    const coveredExport = await fetch(`${readerUrl}${bookPath}/exports`, {method:"POST",body:JSON.stringify({format:"json",scope:"read_range",chapter_ids:[],session_id:persisted.session_id})});
+    expect(JSON.parse(readFileSync((await coveredExport.json()).local_path,"utf8")).chapters.map(chapter=>chapter.chapter_id)).toEqual([second]);
+    await page.locator(`[data-chapter="${first}"]`).click();
+    await expect(page.locator(".reader-main")).toBeVisible();
+    await expect.poll(async () => (await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState))).current_location.chapter_id).toBe(first);
+    browserState = await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState));
+    expect(browserState.read_coverage).toEqual(persisted.read_coverage);
+    expect(browserState.progress_basis_points).toBe(persisted.progress_basis_points);
+    const skipped = await fetch(`${readerUrl}${bookPath}/chapters/${first}/checkpoint`, {method:"POST",body:JSON.stringify({reader_state:browserState,spoiler_mode:"read_range"})});
+    expect(skipped.status).toBe(403);
+    writeFileSync(info.outputPath("read-coverage.json"), JSON.stringify({partial: scoped.spoiler_boundary, persisted, back:browserState},null,2));
     expect(errors).toEqual([]);
     await page.screenshot({ path: info.outputPath("reader.png"), fullPage: true });
   } finally {

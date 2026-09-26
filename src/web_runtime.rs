@@ -574,7 +574,7 @@ impl WebRuntime {
         if request.book_id != self.book.book_id {
             return Err(RuntimeError::not_found("unknown book"));
         }
-        self.book.chapter(&request.current_location.chapter_id)?;
+        self.location_key(&request.current_location)?;
         let mut state = self.lock_state()?;
         if let Some(session) = state
             .sessions
@@ -593,6 +593,8 @@ impl WebRuntime {
             progress_basis_points: 0,
             spoiler_mode: request.spoiler_mode,
             revision: 1,
+            read_coverage: Vec::new(),
+            completed_chapter_ids: Vec::new(),
         };
         state.sessions.insert(session_id, session.clone());
         self.save_state(&state)?;
@@ -608,10 +610,10 @@ impl WebRuntime {
             RuntimeError::bad_request(format!("invalid session patch: {error:?}"))
         })?;
         if let Some(location) = &request.current_location {
-            self.book.chapter(&location.chapter_id)?;
+            self.location_key(location)?;
         }
         if let Some(location) = &request.read_until {
-            self.book.chapter(&location.chapter_id)?;
+            self.location_key(location)?;
         }
         let requested_read_until = request
             .read_until
@@ -623,23 +625,53 @@ impl WebRuntime {
             .sessions
             .get_mut(session_id)
             .ok_or_else(|| RuntimeError::not_found("unknown reader session"))?;
-        if requested_read_until.is_some_and(|requested| {
-            self.location_key(&session.read_until)
-                .is_ok_and(|current| requested < current)
-        }) {
-            return Err(RuntimeError::bad_request(
-                "read_until must not move backwards",
-            ));
-        }
         if let Some(location) = request.current_location {
             session.current_location = location;
         }
         if let Some(location) = request.read_until {
-            session.read_until = location;
+            if let Some(previous) = session
+                .read_coverage
+                .iter_mut()
+                .find(|previous| previous.chapter_id == location.chapter_id)
+            {
+                if self.location_key(&location)? > self.location_key(previous)? {
+                    *previous = location.clone();
+                }
+            } else {
+                session.read_coverage.push(location.clone());
+            }
+            if requested_read_until > Some(self.location_key(&session.read_until)?) {
+                session.read_until = location;
+            }
         }
-        if let Some(progress) = request.progress_basis_points {
-            session.progress_basis_points = session.progress_basis_points.max(progress);
-        }
+        session
+            .read_coverage
+            .sort_by(|left, right| left.chapter_id.cmp(&right.chapter_id));
+        session.completed_chapter_ids = self
+            .book
+            .chapter_ids()
+            .into_iter()
+            .filter(|id| self.chapter_covered(id, &session.read_coverage))
+            .collect();
+        let total: usize = self
+            .book
+            .chapters
+            .iter()
+            .flat_map(|chapter| &chapter.blocks)
+            .map(|block| block.text.chars().count())
+            .sum();
+        let read: usize = self
+            .book
+            .chapters
+            .iter()
+            .flat_map(|chapter| &chapter.blocks)
+            .map(|block| self.visible_chars(block, &session.read_coverage))
+            .sum();
+        session.progress_basis_points = (read
+            .saturating_mul(10_000)
+            .checked_div(total)
+            .unwrap_or(0)
+            .min(10_000)) as u16;
         if let Some(mode) = request.spoiler_mode {
             session.spoiler_mode = mode;
         }
@@ -746,31 +778,83 @@ impl WebRuntime {
             }
         }
         let all_ids = self.book.chapter_ids();
-        let limit_id = match mode {
-            SpoilerMode::ReadRange => &reader_state.read_until.chapter_id,
-            SpoilerMode::CurrentChapter => &reader_state.current_location.chapter_id,
+        let coverage = match mode {
+            SpoilerMode::ReadRange => {
+                if let Some(id) = &reader_state.session_id {
+                    self.lock_state()?.sessions[id].read_coverage.clone()
+                } else if reader_state.read_coverage.is_empty() {
+                    // Legacy stateless requests declare only this chapter, never preceding chapters.
+                    vec![reader_state.read_until.clone()]
+                } else {
+                    reader_state.read_coverage.clone()
+                }
+            }
+            SpoilerMode::CurrentChapter => self
+                .chapter_end(&reader_state.current_location.chapter_id)
+                .into_iter()
+                .collect(),
             SpoilerMode::FullBook => all_ids
-                .last()
-                .ok_or_else(|| RuntimeError::bad_request("book has no chapters"))?,
+                .iter()
+                .filter_map(|id| self.chapter_end(id))
+                .collect(),
         };
-        let limit = all_ids
-            .iter()
-            .position(|chapter_id| chapter_id == limit_id)
-            .ok_or_else(|| RuntimeError::bad_request("reader boundary chapter does not exist"))?;
-        let allowed = all_ids[..=limit].iter().cloned().collect::<BTreeSet<_>>();
-        let excluded_chapter_ids = all_ids[limit + 1..].to_vec();
+        let mut allowed = BTreeSet::new();
+        for location in &coverage {
+            self.location_key(location)?;
+            allowed.insert(location.chapter_id.clone());
+        }
         Ok((
             SpoilerBoundary {
                 mode,
-                read_until: match mode {
-                    SpoilerMode::ReadRange => Some(reader_state.read_until.clone()),
-                    SpoilerMode::CurrentChapter => Some(reader_state.current_location.clone()),
-                    SpoilerMode::FullBook => None,
-                },
-                excluded_chapter_ids,
+                read_until: (mode != SpoilerMode::FullBook)
+                    .then(|| reader_state.read_until.clone()),
+                excluded_chapter_ids: all_ids
+                    .into_iter()
+                    .filter(|id| !allowed.contains(id))
+                    .collect(),
+                read_coverage: coverage,
             },
             allowed,
         ))
+    }
+
+    fn chapter_end(&self, id: &str) -> Option<ReaderLocation> {
+        let last = self.book.chapter(id).ok()?.blocks.last()?;
+        Some(ReaderLocation {
+            chapter_id: id.to_owned(),
+            block_id: Some(last.block_id.clone()),
+            char_offset: Some(last.text.chars().count() as u32),
+            epub_cfi: None,
+        })
+    }
+
+    fn chapter_covered(&self, id: &str, coverage: &[ReaderLocation]) -> bool {
+        self.book.chapter(id).is_ok_and(|chapter| {
+            !chapter.blocks.is_empty()
+                && chapter
+                    .blocks
+                    .iter()
+                    .all(|block| self.visible_chars(block, coverage) == block.text.chars().count())
+        })
+    }
+
+    fn visible_chars(&self, block: &RuntimeBlock, coverage: &[ReaderLocation]) -> usize {
+        coverage
+            .iter()
+            .filter(|limit| limit.chapter_id == block.chapter_id)
+            .filter_map(|limit| {
+                let last = self.book.block(limit.block_id.as_deref()?)?;
+                Some(if block.order < last.order {
+                    block.text.chars().count()
+                } else if block.order == last.order {
+                    limit.char_offset.unwrap_or(0) as usize
+                } else {
+                    0
+                })
+            })
+            .max()
+            .unwrap_or(0)
+            .min(block.text.chars().count())
     }
 
     fn assemble_context(
@@ -786,7 +870,7 @@ impl WebRuntime {
             .cloned();
         if mode == SpoilerMode::ReadRange {
             if let Some(reference) = source_ref {
-                self.validate_read_limit(reference, &reader_state.read_until)?;
+                self.validate_read_limit(reference, &boundary.read_coverage)?;
             }
         }
         let current_chapter_id = selected_block
@@ -811,39 +895,12 @@ impl WebRuntime {
                 "current chapter crosses spoiler boundary",
             ));
         }
-        let limit = if mode == SpoilerMode::ReadRange {
-            reader_state
-                .read_until
-                .block_id
-                .as_ref()
-                .map(|id| {
-                    self.book
-                        .block(id)
-                        .filter(|block| block.chapter_id == reader_state.read_until.chapter_id)
-                        .ok_or_else(|| RuntimeError::bad_request("read_until block is invalid"))
-                })
-                .transpose()?
-        } else {
-            None
-        };
         let visible_block = |mut block: RuntimeBlock| {
-            if let Some(limit) = limit {
-                if block.chapter_id == limit.chapter_id {
-                    if block.order > limit.order {
-                        return None;
-                    }
-                    if block.order == limit.order {
-                        if let Some(offset) = reader_state.read_until.char_offset {
-                            block.text = block.text.chars().take(offset as usize).collect();
-                        }
-                    }
-                }
-            }
+            let visible = self.visible_chars(&block, &boundary.read_coverage);
+            block.text = block.text.chars().take(visible).collect();
             (!block.text.is_empty()).then_some(block)
         };
-        let chapter_fully_read = chapter.blocks.last().is_none_or(|block| {
-            visible_block(block.clone()).is_some_and(|visible| visible.text == block.text)
-        });
+        let chapter_fully_read = self.chapter_covered(current_chapter_id, &boundary.read_coverage);
         nearby_blocks = nearby_blocks
             .into_iter()
             .filter_map(visible_block)
@@ -865,7 +922,7 @@ impl WebRuntime {
                         self.validate_source_ref(reference, &allowed).is_ok()
                             && (mode != SpoilerMode::ReadRange
                                 || self
-                                    .validate_read_limit(reference, &reader_state.read_until)
+                                    .validate_read_limit(reference, &boundary.read_coverage)
                                     .is_ok())
                     })
             })
@@ -879,7 +936,13 @@ impl WebRuntime {
             .collect();
         let chapter_analysis = chapter_fully_read
             .then(|| self.book.analyses.get(current_chapter_id).cloned())
-            .flatten();
+            .flatten()
+            .filter(|analysis| {
+                chapter_analysis_refs(analysis).iter().all(|reference| {
+                    self.validate_read_limit(reference, &boundary.read_coverage)
+                        .is_ok()
+                })
+            });
         let argument_flow = chapter_analysis
             .as_ref()
             .map(|analysis| {
@@ -936,31 +999,15 @@ impl WebRuntime {
     fn validate_read_limit(
         &self,
         reference: &AnalysisSourceRef,
-        read_until: &ReaderLocation,
+        coverage: &[ReaderLocation],
     ) -> Result<(), RuntimeError> {
         let block = self
             .book
             .block(&reference.block_id)
             .ok_or_else(|| RuntimeError::bad_request("source_ref block does not exist"))?;
-        if block.chapter_id != read_until.chapter_id {
-            return Ok(());
-        }
-        let Some(limit_block_id) = &read_until.block_id else {
-            return Ok(());
-        };
-        let limit = self
-            .book
-            .block(limit_block_id)
-            .filter(|limit| limit.chapter_id == read_until.chapter_id)
-            .ok_or_else(|| RuntimeError::bad_request("read_until block is invalid"))?;
-        if block.order > limit.order
-            || (block.order == limit.order
-                && read_until
-                    .char_offset
-                    .is_some_and(|offset| reference.end_char > offset as usize))
-        {
+        if reference.end_char > self.visible_chars(block, coverage) {
             return Err(RuntimeError::forbidden(
-                "source_ref is beyond the read_until location",
+                "source_ref is beyond recorded read coverage",
             ));
         }
         Ok(())
@@ -976,6 +1023,11 @@ impl WebRuntime {
             .iter()
             .find(|block| &block.block_id == block_id)
             .ok_or_else(|| RuntimeError::bad_request("reader location block is invalid"))?;
+        if location.char_offset.unwrap_or(0) as usize > block.text.chars().count() {
+            return Err(RuntimeError::bad_request(
+                "reader location offset is invalid",
+            ));
+        }
         Ok((
             chapter.spine_index,
             block.order,
@@ -1098,7 +1150,7 @@ impl WebRuntime {
                         end_char: last.text.chars().count(),
                         text_fingerprint: last.text_fingerprint.clone(),
                     },
-                    &reader_state.read_until,
+                    &boundary.read_coverage,
                 )?;
             }
         }
@@ -1254,22 +1306,11 @@ impl WebRuntime {
         if cards.is_empty() {
             return Err(RuntimeError::bad_gateway("agent returned no cards"));
         }
-        let (_, allowed) = self.boundary(
-            &ReaderState {
-                session_id: None,
-                current_location: boundary
-                    .read_until
-                    .clone()
-                    .unwrap_or_else(|| last_location(&self.book)),
-                read_until: boundary
-                    .read_until
-                    .clone()
-                    .unwrap_or_else(|| last_location(&self.book)),
-                completed_chapter_ids: Vec::new(),
-                progress_basis_points: 0,
-            },
-            boundary.mode,
-        )?;
+        let allowed = boundary
+            .read_coverage
+            .iter()
+            .map(|location| location.chapter_id.clone())
+            .collect();
         for card in cards {
             if card.card_id.trim().is_empty() || card.title.trim().is_empty() {
                 return Err(RuntimeError::bad_gateway(
@@ -1289,12 +1330,8 @@ impl WebRuntime {
             for reference in &card.source_refs {
                 self.validate_source_ref(reference, &allowed)
                     .map_err(|error| RuntimeError::bad_gateway(error.message))?;
-                if boundary.mode == SpoilerMode::ReadRange {
-                    if let Some(read_until) = &boundary.read_until {
-                        self.validate_read_limit(reference, read_until)
-                            .map_err(|error| RuntimeError::bad_gateway(error.message))?;
-                    }
-                }
+                self.validate_read_limit(reference, &boundary.read_coverage)
+                    .map_err(|error| RuntimeError::bad_gateway(error.message))?;
             }
             let expected_status = if boundary.mode == SpoilerMode::FullBook {
                 SpoilerStatus::FullBookAllowed
@@ -1389,11 +1426,9 @@ impl WebRuntime {
         let allowed = context.allowed_chapter_ids.iter().cloned().collect();
         let visible_reference = |reference: &AnalysisSourceRef| {
             self.validate_source_ref(reference, &allowed).is_ok()
-                && (boundary.mode != SpoilerMode::ReadRange
-                    || boundary
-                        .read_until
-                        .as_ref()
-                        .is_none_or(|limit| self.validate_read_limit(reference, limit).is_ok()))
+                && self
+                    .validate_read_limit(reference, &boundary.read_coverage)
+                    .is_ok()
         };
         let concept = self
             .book
@@ -1583,11 +1618,10 @@ impl WebRuntime {
                     .sessions
                     .get(session_id)
                     .ok_or_else(|| RuntimeError::not_found("unknown reader session"))?;
-                let position = all_ids
-                    .iter()
-                    .position(|chapter_id| chapter_id == &session.read_until.chapter_id)
-                    .ok_or_else(|| RuntimeError::bad_request("session read range is invalid"))?;
-                Ok(all_ids[..=position].to_vec())
+                Ok(all_ids
+                    .into_iter()
+                    .filter(|id| self.chapter_covered(id, &session.read_coverage))
+                    .collect())
             }
         }
     }
@@ -2303,24 +2337,6 @@ fn spoiler_status(boundary: &SpoilerBoundary) -> SpoilerStatus {
         SpoilerStatus::FullBookAllowed
     } else {
         SpoilerStatus::WithinBoundary
-    }
-}
-
-fn last_location(book: &RuntimeBook) -> ReaderLocation {
-    let chapter = book
-        .chapters
-        .iter()
-        .rev()
-        .find(|chapter| !chapter.is_noise)
-        .expect("runtime requires at least one readable chapter");
-    ReaderLocation {
-        chapter_id: chapter.chapter_id.clone(),
-        block_id: chapter.blocks.last().map(|block| block.block_id.clone()),
-        char_offset: chapter
-            .blocks
-            .last()
-            .map(|block| block.text.chars().count().min(u32::MAX as usize) as u32),
-        epub_cfi: None,
     }
 }
 
