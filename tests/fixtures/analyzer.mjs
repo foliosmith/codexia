@@ -6,9 +6,15 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 
-if (request.task === "chapter_analysis") {
-  const chapter = request.context.chapter;
+if (["chapter_analysis", "chapter_reanalysis"].includes(request.task)) {
+  for (const name of ["concepts", "claims", "argument_flow", "difficult_passages", "entities"]) {
+    if (!request.output_schema[name]?.[0] || typeof request.output_schema[name][0] !== "object") {
+      throw new Error(`strict provider requires an item schema for ${name}`);
+    }
+  }
+  const chapter = request.context?.chapter || { chapter_id: request.chapter_id, title: request.chapter_title };
   const label = chapter.title || chapter.chapter_id;
+  const block = request.context?.chapter.blocks[0];
   process.stdout.write(JSON.stringify({
     summary: {
       one_sentence: `Offline registration baseline for ${label}.`,
@@ -17,7 +23,11 @@ if (request.task === "chapter_analysis") {
       role_in_book: "Preserves chapter order for the offline registration baseline.",
     },
     key_ideas: [],
-    concepts: [],
+    concepts: process.env.CODEXIA_TEST_GROUNDING_MODE ? [{
+      concept_id: `concept-${chapter.chapter_id}`, name: "Test inference", aliases: [],
+      definition_in_this_book: "An interpretation with contextual support.",
+      source_refs: [{ block_id: block.block_id, start_char: 0, end_char: Array.from(block.text).length, text_fingerprint: block.text_fingerprint }],
+    }] : [],
     claims: [],
     argument_flow: [],
     difficult_passages: [],
@@ -45,7 +55,13 @@ if (request.task === "chapter_analysis") {
       difficulty_map: ids.map((chapter_id) => ({ chapter_id, level: "intermediate", reason: "Not scored by the offline registration analyzer." })),
       key_chapter_ids: ids.slice(0, 1),
     },
-    concepts: [],
+    concepts: process.env.CODEXIA_TEST_GROUNDING_MODE ? [{
+      concept_id: "test-inference", name: "Test inference", aliases: [],
+      definition_in_this_book: "An interpretation with contextual support.",
+      appearances: process.env.CODEXIA_TEST_GROUNDING_MODE === "inferred-refs" ? chapters[0].concepts[0].source_refs : [],
+      related_concepts: [], importance: 50,
+      grounding: process.env.CODEXIA_TEST_GROUNDING_MODE === "inferred-refs" ? "inferred" : "grounded",
+    }] : [],
     claims: [],
     entities: [],
     checkpoints: ids.map((chapter_id) => ({

@@ -766,11 +766,7 @@ fn collect_diff(path: &str, left: &Value, right: &Value, diffs: &mut Vec<DiffEnt
 }
 
 fn chapter_reanalysis_schema() -> Value {
-    json!({
-        "summary": {"one_sentence":"string","short":"string","deep":"string","role_in_book":"string"},
-        "key_ideas": ["string"],
-        "concepts": [], "claims": [], "argument_flow": [], "difficult_passages": [], "entities": []
-    })
+    serde_json::from_str(chapter_analysis::OUTPUT_SCHEMA).expect("embedded chapter analysis schema")
 }
 
 impl StudioRuntime {

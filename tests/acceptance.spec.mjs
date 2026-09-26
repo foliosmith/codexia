@@ -151,7 +151,9 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     expect((await api("/v1/usage")).compile_count).toBe(usage.compile_count);
     expect(await api(`/v1/reader-sessions/${session.session_id}`)).toEqual(session);
 
-    await start(["serve", packageDir, "--state-dir", join(root, "reader-state"), "--bind", "127.0.0.1:18788"], `${readerUrl}/v1/bootstrap`);
+    await start(["serve", packageDir, "--state-dir", join(root, "reader-state"), "--bind", "127.0.0.1:18788", "--agent-command", fixture], `${readerUrl}/v1/bootstrap`);
+    const reanalyzed = await fetch(`${readerUrl}/v1/studio/chapters/${second}/reanalyze`, { method: "POST", body: JSON.stringify({ analyzer_label: "strict-provider-v2" }) });
+    expect(reanalyzed.status, await reanalyzed.text()).toBe(200);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${readerUrl}/#read/${second}`);

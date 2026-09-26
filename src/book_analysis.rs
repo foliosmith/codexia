@@ -728,17 +728,12 @@ fn require_grounding(
     grounding: Grounding,
     source_refs: &[AnalysisSourceRef],
 ) -> Result<(), AnalysisError> {
-    let expected = if source_refs.is_empty() {
-        Grounding::Inferred
-    } else {
-        Grounding::Grounded
-    };
-    if grounding == expected {
-        Ok(())
-    } else {
+    if grounding == Grounding::Grounded && source_refs.is_empty() {
         Err(AnalysisError::new(format!(
-            "{name} grounding must match source availability"
+            "grounded {name} requires source references"
         )))
+    } else {
+        Ok(())
     }
 }
 
