@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "cd .. && playwright test tests/acceptance.spec.mjs --workers=1 --output=private/acceptance/playwright --reporter=line"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

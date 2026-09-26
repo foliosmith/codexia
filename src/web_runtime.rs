@@ -770,7 +770,7 @@ impl WebRuntime {
         mode: SpoilerMode,
     ) -> Result<(AssembledContext, SpoilerBoundary), RuntimeError> {
         let (boundary, allowed) = self.boundary(reader_state, mode)?;
-        let selected_block = source_ref
+        let mut selected_block = source_ref
             .map(|reference| self.validate_source_ref(reference, &allowed))
             .transpose()?
             .cloned();
@@ -785,7 +785,7 @@ impl WebRuntime {
                 &block.chapter_id
             });
         let chapter = self.book.chapter(current_chapter_id)?;
-        let nearby_blocks = if let Some(selected) = &selected_block {
+        let mut nearby_blocks = if let Some(selected) = &selected_block {
             let position = chapter
                 .blocks
                 .iter()
@@ -796,6 +796,48 @@ impl WebRuntime {
         } else {
             chapter.blocks.iter().take(3).cloned().collect()
         };
+        if !allowed.contains(current_chapter_id) {
+            return Err(RuntimeError::forbidden(
+                "current chapter crosses spoiler boundary",
+            ));
+        }
+        let limit = if mode == SpoilerMode::ReadRange {
+            reader_state
+                .read_until
+                .block_id
+                .as_ref()
+                .map(|id| {
+                    self.book
+                        .block(id)
+                        .filter(|block| block.chapter_id == reader_state.read_until.chapter_id)
+                        .ok_or_else(|| RuntimeError::bad_request("read_until block is invalid"))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let visible_block = |mut block: RuntimeBlock| {
+            if let Some(limit) = limit {
+                if block.chapter_id == limit.chapter_id {
+                    if block.order > limit.order {
+                        return None;
+                    }
+                    if block.order == limit.order {
+                        if let Some(offset) = reader_state.read_until.char_offset {
+                            block.text = block.text.chars().take(offset as usize).collect();
+                        }
+                    }
+                }
+            }
+            (!block.text.is_empty()).then_some(block)
+        };
+        let chapter_fully_read = chapter.blocks.last().is_none_or(|block| {
+            visible_block(block.clone()).is_some_and(|visible| visible.text == block.text)
+        });
+        nearby_blocks = nearby_blocks
+            .into_iter()
+            .filter_map(visible_block)
+            .collect();
         let chapter_block_ids = chapter
             .blocks
             .iter()
@@ -808,6 +850,16 @@ impl WebRuntime {
             .concepts
             .iter()
             .filter(|concept| {
+                !concept.appearances.is_empty()
+                    && concept.appearances.iter().all(|reference| {
+                        self.validate_source_ref(reference, &allowed).is_ok()
+                            && (mode != SpoilerMode::ReadRange
+                                || self
+                                    .validate_read_limit(reference, &reader_state.read_until)
+                                    .is_ok())
+                    })
+            })
+            .filter(|concept| {
                 concept
                     .appearances
                     .iter()
@@ -815,7 +867,9 @@ impl WebRuntime {
             })
             .filter_map(|concept| serde_json::to_value(concept).ok())
             .collect();
-        let chapter_analysis = self.book.analyses.get(current_chapter_id).cloned();
+        let chapter_analysis = chapter_fully_read
+            .then(|| self.book.analyses.get(current_chapter_id).cloned())
+            .flatten();
         let argument_flow = chapter_analysis
             .as_ref()
             .map(|analysis| {
@@ -827,6 +881,7 @@ impl WebRuntime {
                     .collect()
             })
             .unwrap_or_default();
+        selected_block = selected_block.and_then(visible_block);
         Ok((
             AssembledContext {
                 book_title: self.book.title.clone(),
@@ -1024,6 +1079,19 @@ impl WebRuntime {
                 "checkpoint crosses spoiler boundary",
             ));
         }
+        if mode == SpoilerMode::ReadRange {
+            if let Some(last) = self.book.chapter(chapter_id)?.blocks.last() {
+                self.validate_read_limit(
+                    &AnalysisSourceRef {
+                        block_id: last.block_id.clone(),
+                        start_char: 0,
+                        end_char: last.text.chars().count(),
+                        text_fingerprint: last.text_fingerprint.clone(),
+                    },
+                    &reader_state.read_until,
+                )?;
+            }
+        }
         let checkpoint = self
             .book
             .documents
@@ -1078,6 +1146,11 @@ impl WebRuntime {
             .iter()
             .find(|checkpoint| checkpoint.checkpoint_id == request.checkpoint_id)
             .ok_or_else(|| RuntimeError::not_found("checkpoint is unavailable"))?;
+        self.checkpoint_response(
+            &checkpoint.chapter_id,
+            &request.reader_state,
+            SpoilerMode::ReadRange,
+        )?;
         let question = checkpoint
             .recall_questions
             .iter()
@@ -1302,12 +1375,24 @@ impl WebRuntime {
         // ponytail: deterministic keyword matching keeps offline mode useful;
         // use --agent-command when semantic retrieval quality matters.
         let normalized = question.to_lowercase();
+        let allowed = context.allowed_chapter_ids.iter().cloned().collect();
+        let visible_reference = |reference: &AnalysisSourceRef| {
+            self.validate_source_ref(reference, &allowed).is_ok()
+                && (boundary.mode != SpoilerMode::ReadRange
+                    || boundary
+                        .read_until
+                        .as_ref()
+                        .is_none_or(|limit| self.validate_read_limit(reference, limit).is_ok()))
+        };
         let concept = self
             .book
             .documents
             .concepts
             .concepts
             .iter()
+            .filter(|concept| {
+                !concept.appearances.is_empty() && concept.appearances.iter().all(visible_reference)
+            })
             .find(|concept| {
                 normalized.contains(&concept.name.to_lowercase())
                     || concept
@@ -1321,13 +1406,11 @@ impl WebRuntime {
                 concept.appearances.clone(),
             )
         } else if let Some(claim) = self.book.documents.claims.claims.iter().find(|claim| {
-            claim.supporting_evidence.iter().all(|evidence| {
-                context.allowed_chapter_ids.iter().any(|chapter_id| {
-                    self.book
-                        .block(&evidence.source_ref.block_id)
-                        .is_some_and(|block| &block.chapter_id == chapter_id)
-                })
-            })
+            !claim.supporting_evidence.is_empty()
+                && claim
+                    .supporting_evidence
+                    .iter()
+                    .all(|evidence| visible_reference(&evidence.source_ref))
         }) {
             (
                 claim.claim.clone(),
@@ -1421,6 +1504,9 @@ impl WebRuntime {
         let exports_dir = self.state_dir.join("exports");
         fs::create_dir_all(&exports_dir)
             .map_err(|error| RuntimeError::internal(format!("cannot create exports: {error}")))?;
+        let exports_dir = exports_dir.join(&export_id);
+        fs::create_dir(&exports_dir)
+            .map_err(|error| RuntimeError::internal(format!("cannot create export: {error}")))?;
         let (file_name, path, downloadable) = match request.format {
             ExportFormat::Json => {
                 let file_name = format!("{}-package.json", safe_name(&self.book.title));
