@@ -90,15 +90,17 @@ if (["chapter_analysis", "chapter_reanalysis"].includes(request.task)) {
     end_char: Array.from(block.text).length,
     text_fingerprint: block.text_fingerprint,
   });
+  const values = { passage: request.input.selected_text || "", explanation: "Only the supplied reading context is available.", simplified: "Supplied context only.", why_it_matters: "It anchors the current passage.", question: request.input.question || "", answer: "The unread ending is unavailable in the supplied context.", feedback: "Recorded answer.", score_basis_points: 8000, expected_points: request.input.expected_points || [] };
+  const content = Object.fromEntries(Object.keys(request.output_schema.cards[0].content).map((key) => [key, values[key]]));
   process.stdout.write(JSON.stringify({ cards: [{
-    card_type: request.task === "reflect_on_answer" ? "reflection" : "explanation",
+    card_type: request.task === "reflect_on_answer" ? "reflection" : request.task === "ask_book" ? "answer" : "explanation",
     card_id: `fixture-${request.task}`,
     title: "Deterministic HTTP fixture",
-    content: { explanation: "Only the supplied reading context is available.", feedback: "Recorded answer.", score_basis_points: 8000 },
+    content,
     source_refs: source ? [source] : [],
     confidence_basis_points: 8000,
     grounding: source ? "grounded" : "inferred",
-    spoiler_status: "within_boundary",
+    spoiler_status: request.spoiler_boundary?.mode === "full_book" ? "full_book_allowed" : "within_boundary",
     follow_up_actions: [],
   }] }));
 } else {

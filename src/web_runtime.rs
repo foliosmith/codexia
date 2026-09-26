@@ -332,6 +332,7 @@ struct AgentRequest {
     instruction: &'static str,
     input: Value,
     context: AssembledContext,
+    spoiler_boundary: SpoilerBoundary,
     output_schema: Value,
 }
 
@@ -1226,7 +1227,8 @@ impl WebRuntime {
             instruction: "Use only supplied context. Cite source_refs, honor spoiler boundary, and return cards matching output_schema.",
             input,
             context: context.clone(),
-            output_schema: runtime_card_schema(),
+            spoiler_boundary: boundary.clone(),
+            output_schema: runtime_card_schema(task),
         };
         let response: AgentResponse = agent
             .execute(&request)
@@ -2313,18 +2315,34 @@ fn last_location(book: &RuntimeBook) -> ReaderLocation {
     }
 }
 
-fn runtime_card_schema() -> Value {
+fn runtime_card_schema(task: &str) -> Value {
+    let (card_type, content) = match task {
+        "explain_passage" => (
+            "explanation",
+            json!({
+                "passage": "string", "explanation": "string", "simplified": "string", "why_it_matters": "string"
+            }),
+        ),
+        "ask_book" => ("answer", json!({"question": "string", "answer": "string"})),
+        "reflect_on_answer" => (
+            "reflection",
+            json!({
+                "score_basis_points": 0, "feedback": "string", "expected_points": ["string"]
+            }),
+        ),
+        _ => unreachable!("unknown reader agent task"),
+    };
     json!({
         "cards": [{
-            "card_type": "explanation|answer|reflection|concept|claim|checkpoint|question|flashcard",
+            "card_type": {"type": "string", "enum": [card_type]},
             "card_id": "string",
             "title": "string",
-            "content": {},
+            "content": content,
             "source_refs": [{"block_id": "string", "start_char": 0, "end_char": 1, "text_fingerprint": "string"}],
             "confidence_basis_points": 0,
             "grounding": "grounded|inferred",
             "spoiler_status": "within_boundary|full_book_allowed",
-            "follow_up_actions": [{"action": "open_source|ask|explain|quiz|note|export|reflect", "label": "string", "payload": {}}]
+            "follow_up_actions": [{"action": "open_source|ask|explain|quiz|note|export|reflect", "label": "string", "payload": {"block_id":"string|null","chapter_id":"string|null","question":"string|null"}}]
         }]
     })
 }

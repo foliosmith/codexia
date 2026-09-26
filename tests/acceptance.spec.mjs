@@ -32,6 +32,7 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     child.on("error", (error) => { log += String(error); });
     await expect.poll(async () => {
       if (child.exitCode !== null) throw new Error(log);
+      if (!log.includes("Codexia:")) return 0;
       try { return (await fetch(url, { headers: { "X-API-Key": key }, signal: AbortSignal.timeout(1000) })).status; }
       catch { return 0; }
     }, { timeout: 10_000 }).toBe(200);
@@ -109,12 +110,17 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     const source = { block_id: block.block_id, start_char: 0, end_char: Array.from(block.text).length, text_fingerprint: block.text_fingerprint };
     const explanation = await api(`${bookPath}/explain`, "POST", { selected_text: block.text, source_ref: source, reader_state, spoiler_mode: "read_range" });
     expect(explanation.cards[0].source_refs).toEqual([source]);
+    expect(explanation.cards[0].content.explanation).toBeTruthy();
     const answer = await api(`${bookPath}/ask`, "POST", { question: "What happens in the unread final chapter?", reader_state, spoiler_mode: "read_range" });
     expect(answer.spoiler_boundary.excluded_chapter_ids).toContain(second);
+    expect(answer.cards[0].content.answer).toBeTruthy();
+    const fullAnswer = await api(`${bookPath}/ask`, "POST", { question: "Summarize the available context.", reader_state, spoiler_mode: "full_book" });
+    expect(fullAnswer.cards[0].spoiler_status).toBe("full_book_allowed");
     const checkpoint = await api(`${bookPath}/chapters/${first}/checkpoint`, "POST", { reader_state, spoiler_mode: "read_range" });
     const cp = checkpoint.cards[0].content;
     const reflection = await api(`${bookPath}/chapters/${first}/reflect`, "POST", { reader_state, checkpoint_id: cp.checkpoint_id, question_id: cp.recall_questions[0].question_id, answer: "The chapter was registered." });
     expect(reflection.cards[0].card_type).toBe("reflection");
+    expect(reflection.cards[0].content.feedback).toBeTruthy();
     await api(`${bookPath}/chapters/${second}/checkpoint`, "POST", { reader_state, spoiler_mode: "read_range" }, 403);
     const unread = (await api(`${bookPath}/chapters/${second}/content`)).blocks[0];
     await api(`${bookPath}/explain`, "POST", { selected_text: unread.text, source_ref: { block_id: unread.block_id, start_char: 0, end_char: Array.from(unread.text).length, text_fingerprint: unread.text_fingerprint }, reader_state, spoiler_mode: "read_range" }, 403);
