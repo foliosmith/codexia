@@ -279,10 +279,10 @@ impl PublicApi {
                 |book_id| self.delegate_to_book(&book_id, request),
             );
         }
-        if matches!(segments.first(), Some(&"v1"))
-            && matches!(segments.get(1), Some(&"reader-sessions") | Some(&"exports"))
-        {
-            return self.delegate_until_handled(request);
+        if let ["v1", kind, id, ..] = segments.as_slice() {
+            if matches!(*kind, "reader-sessions" | "exports") {
+                return self.delegate_resource(kind, id, request);
+            }
         }
         error_response(404, "not_found", "route not found", false)
     }
@@ -425,17 +425,32 @@ impl PublicApi {
         }
     }
 
-    fn delegate_until_handled(&self, request: &HttpRequest) -> HttpResponse {
+    fn delegate_resource(&self, kind: &str, id: &str, request: &HttpRequest) -> HttpResponse {
         let Ok(books) = self.lock_books() else {
             return error_response(500, "internal_error", "book lock is poisoned", true);
         };
+        let mut owner = None;
         for runtime in books.values() {
-            let response = runtime.dispatch(&request.method, &request.target, &request.body);
-            if response.status() != 404 {
-                return response;
+            match runtime.contains_resource(kind, id) {
+                Ok(false) => {}
+                Ok(true) => {
+                    if owner.is_some() {
+                        return error_response(
+                            409,
+                            "ambiguous_resource",
+                            format!("{kind} id {id} exists in more than one book"),
+                            false,
+                        );
+                    }
+                    owner = Some(runtime);
+                }
+                Err(error) => return error_response(500, "internal_error", error, true),
             }
         }
-        error_response(404, "not_found", "resource not found", false)
+        owner.map_or_else(
+            || error_response(404, "not_found", "resource not found", false),
+            |runtime| runtime.dispatch(&request.method, &request.target, &request.body),
+        )
     }
 
     fn record_usage(&self, request: &HttpRequest, response: &HttpResponse) {

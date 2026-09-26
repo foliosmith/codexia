@@ -451,6 +451,15 @@ impl WebRuntime {
         })
     }
 
+    pub(crate) fn contains_resource(&self, kind: &str, id: &str) -> Result<bool, String> {
+        let state = self.lock_state().map_err(|error| error.message)?;
+        Ok(match kind {
+            "reader-sessions" => state.sessions.contains_key(id),
+            "exports" => state.exports.contains_key(id),
+            _ => false,
+        })
+    }
+
     fn save_state(&self, state: &PersistedState) -> Result<(), RuntimeError> {
         let path = self.state_dir.join("reader_state.json");
         let temporary = self.state_dir.join("reader_state.json.tmp");
@@ -575,7 +584,7 @@ impl WebRuntime {
         {
             return Ok(session);
         }
-        let session_id = state.id("session");
+        let session_id = state.id(&format!("session-{}", self.book.book_id));
         let session = ReaderSession {
             session_id: session_id.clone(),
             book_id: request.book_id,
@@ -1501,7 +1510,7 @@ impl WebRuntime {
         let chapter_ids = self.export_chapter_ids(&request)?;
         let export_id = {
             let mut state = self.lock_state()?;
-            state.id("export")
+            state.id(&format!("export-{}", self.book.book_id))
         };
         let exports_dir = self.state_dir.join("exports");
         fs::create_dir_all(&exports_dir)

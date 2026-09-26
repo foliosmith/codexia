@@ -95,6 +95,7 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     const block = content.blocks.at(-1);
     const location = { chapter_id: first, block_id: block.block_id, char_offset: 0, epub_cfi: null };
     const created = await api("/v1/reader-sessions", "POST", { book_id: bookId, current_location: location, spoiler_mode: "read_range" }, 201);
+    const earlyExport = await api(`${bookPath}/exports`, "POST", { format: "json", scope: "whole_book", chapter_ids: [], session_id: created.session_id }, 201);
     const session = await api(`/v1/reader-sessions/${created.session_id}`, "PATCH", {
       current_location: location,
       read_until: { ...location, char_offset: Array.from(block.text).length },
@@ -149,13 +150,34 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
         }
       }
     }
+    const otherBook = await api("/v1/books", "POST", readFileSync("private/golden-books/source/the-souls-of-black-folk-pg408.epub"), 202);
+    await expect.poll(async () => (await api(otherBook.status_href)).state, { timeout: 30_000 }).toBe("ready");
+    const otherSession = await api("/v1/reader-sessions", "POST", { book_id: otherBook.book_id, current_location: { chapter_id: "chapter_002", block_id: null, char_offset: null, epub_cfi: null }, spoiler_mode: "read_range" }, 201);
+    expect((await api(`/v1/reader-sessions/${otherSession.session_id}`)).book_id).toBe(otherBook.book_id);
+    const otherUpdated = await api(`/v1/reader-sessions/${otherSession.session_id}`, "PATCH", { progress_basis_points: 2000 });
+    expect((await api(`/v1/reader-sessions/${session.session_id}`)).progress_basis_points).toBe(session.progress_basis_points);
+    const otherExport = await api(`/v1/books/${otherBook.book_id}/exports`, "POST", { format: "json", scope: "whole_book", chapter_ids: [], session_id: otherSession.session_id }, 201);
+    expect(otherExport.export_id).not.toBe(earlyExport.export_id);
+    expect((await api(otherExport.href)).book_id).toBe(otherBook.book_id);
+    expect((await api(earlyExport.href)).book_id).toBe(bookId);
     const usage = await api("/v1/usage");
-    expect(usage.compile_count).toBe(1);
+    expect(usage.compile_count).toBe(2);
     await stop(server);
+    for (const [id, currentSession, exported] of [[bookId, session, earlyExport], [otherBook.book_id, otherUpdated, otherExport]]) {
+      const path = join(root, "state", id, "reader_state.json");
+      const state = JSON.parse(readFileSync(path, "utf8"));
+      state.sessions["session-00000001"] = { ...currentSession, session_id: "session-00000001" };
+      state.exports["export-00000002"] = { ...state.exports[exported.export_id], export_id: "export-00000002" };
+      writeFileSync(path, JSON.stringify(state));
+    }
     server = await start(apiArgs, `${apiUrl}/health`);
     expect((await api(uploaded.status_href)).state).toBe("ready");
     expect((await api("/v1/usage")).compile_count).toBe(usage.compile_count);
     expect(await api(`/v1/reader-sessions/${session.session_id}`)).toEqual(session);
+    expect(await api(`/v1/reader-sessions/${otherUpdated.session_id}`)).toEqual(otherUpdated);
+    await api("/v1/reader-sessions/session-00000001", "GET", undefined, 409);
+    await api("/v1/reader-sessions/session-00000001", "PATCH", { progress_basis_points: 9999 }, 409);
+    await api("/v1/exports/export-00000002", "GET", undefined, 409);
 
     await start(["serve", packageDir, "--state-dir", join(root, "reader-state"), "--bind", "127.0.0.1:18788", "--agent-command", fixture], `${readerUrl}/v1/bootstrap`);
     const reanalyzed = await fetch(`${readerUrl}/v1/studio/chapters/${second}/reanalyze`, { method: "POST", body: JSON.stringify({ analyzer_label: "strict-provider-v2" }) });

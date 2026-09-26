@@ -68,6 +68,8 @@ npm --prefix tests run e2e
 Requires the registered Alice EPUB at
 `private/golden-books/source/alices-adventures-in-wonderland-pg11.epub`, or set
 `CODEXIA_ACCEPTANCE_EPUB` to an equivalent Alice EPUB with multiple chapters.
+The multi-book regression also requires
+`private/golden-books/source/the-souls-of-black-folk-pg408.epub`.
 Ports 18787 and 18788 must be free. The test starts and stops its own servers.
 
 The test uploads real EPUB bytes over HTTP, polls ready, reads package endpoints,
@@ -83,7 +85,10 @@ Artifacts are written under `private/acceptance/playwright/`: `trace.zip`,
 
 Regression cases include partially read paragraph context and chapter summaries,
 premature checkpoints, unread chapter actions, and whole-book exports followed
-by restricted exports without retaining excluded Obsidian files.
+by restricted exports without retaining excluded Obsidian files. Multi-book checks
+verify session ownership and export downloads across restart. New resource IDs
+include the book ID; ambiguous legacy IDs return `409 ambiguous_resource` before
+any session mutation instead of selecting an arbitrary book.
 
 For real online Reader Cards against an already validated package:
 
