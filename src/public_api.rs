@@ -13,6 +13,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::book_analysis::{read_compile_status, write_atomic_json};
 use crate::web_runtime::{serve_http, HttpRequest, HttpResponse, WebRuntime};
 
 const OPENAPI_JSON: &str = include_str!("../schemas/openapi.json");
@@ -64,6 +65,10 @@ struct BookJob {
     progress_basis_points: u16,
     current_stage: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    profile: String,
+    #[serde(default)]
+    attempt: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -129,18 +134,145 @@ impl PublicApi {
     }
 
     fn load_existing_books(&self) -> Result<(), String> {
-        let books_dir = self.library_dir.join("books");
-        for entry in fs::read_dir(&books_dir).map_err(|error| error.to_string())? {
+        for entry in
+            fs::read_dir(self.library_dir.join("books")).map_err(|error| error.to_string())?
+        {
             let path = entry.map_err(|error| error.to_string())?.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
             let package = path.join("package");
-            if package.join("manifest.json").is_file() {
-                self.register_package(&package)?;
+            let status = read_compile_status(&package).ok();
+            let saved = fs::read(path.join("job.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<BookJob>(&bytes).ok());
+            let job = saved
+                .filter(|job| job.book_id == id)
+                .unwrap_or_else(|| BookJob {
+                    book_id: id.to_owned(),
+                    state: JobState::Failed,
+                    progress_basis_points: 0,
+                    current_stage: None,
+                    error: None,
+                    profile: status
+                        .as_ref()
+                        .map_or_else(|| "standard".to_owned(), |status| status.profile.clone()),
+                    attempt: status.as_ref().map_or(0, |status| status.attempt),
+                });
+            self.lock_jobs()
+                .map_err(|error| error.message)?
+                .insert(id.to_owned(), job);
+            let result = if status
+                .as_ref()
+                .is_some_and(|status| status.source_hash.chars().take(16).collect::<String>() != id)
+            {
+                Err("package identity does not match library directory".to_owned())
+            } else {
+                self.register_package(&package)
+            };
+            if let Err(error) = result {
+                self.update_job(
+                    id,
+                    JobState::Failed,
+                    0,
+                    None,
+                    Some(format!("Recovery required: {error}")),
+                );
             }
         }
         Ok(())
     }
 
+    fn persist_job(&self, job: &BookJob) -> Result<(), String> {
+        let dir = self.library_dir.join("books").join(&job.book_id);
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        write_atomic_json(&dir.join("job.json"), job)
+    }
+
+    fn queue_job(self: &Arc<Self>, mut job: BookJob) -> HttpResponse {
+        job.state = JobState::Queued;
+        job.current_stage = Some("parse".to_owned());
+        job.progress_basis_points = 0;
+        job.error = None;
+        let id = job.book_id.clone();
+        let profile = job.profile.clone();
+        match self.lock_jobs() {
+            Ok(mut jobs) => {
+                if jobs.get(&id).is_some_and(|existing| {
+                    matches!(existing.state, JobState::Queued | JobState::Processing)
+                }) {
+                    return json_response(
+                        202,
+                        json!({"book_id":id,"status_href":format!("/v1/books/{id}/status")}),
+                    );
+                }
+                if let Err(error) = self.persist_job(&job) {
+                    return error_response(500, "storage_error", error, true);
+                }
+                jobs.insert(id.clone(), job);
+            }
+            Err(error) => return error_response(error.status, error.code, error.message, true),
+        }
+        let api = Arc::clone(self);
+        let dir = self.library_dir.join("books").join(&id);
+        let worker_id = id.clone();
+        thread::spawn(move || api.compile_job(worker_id, dir, profile));
+        json_response(
+            202,
+            json!({"book_id":id,"status_href":format!("/v1/books/{id}/status")}),
+        )
+    }
+
+    fn retry(self: &Arc<Self>, id: &str) -> HttpResponse {
+        let job = match self.lock_jobs() {
+            Ok(jobs) => jobs.get(id).cloned(),
+            Err(error) => return error_response(error.status, error.code, error.message, true),
+        };
+        let Some(mut job) = job else {
+            return error_response(404, "not_found", "unknown book", false);
+        };
+        if job.state != JobState::Failed {
+            return error_response(409, "not_failed", "only failed jobs can be retried", false);
+        }
+        if self.config.analyzer_command.is_none()
+            || !self
+                .library_dir
+                .join("books")
+                .join(id)
+                .join("source.epub")
+                .is_file()
+        {
+            return error_response(
+                409,
+                "retry_unavailable",
+                "retry requires the source EPUB and analyzer",
+                false,
+            );
+        }
+        job.attempt = job.attempt.saturating_add(1);
+        self.queue_job(job)
+    }
+
     pub fn register_package(&self, package_dir: &Path) -> Result<String, String> {
+        let status = read_compile_status(package_dir)?;
+        if !status.complete {
+            return Err(status
+                .error
+                .unwrap_or_else(|| "compilation was interrupted or is incomplete".to_owned()));
+        }
+        let validation = Command::new(&self.config.compiler_executable)
+            .arg("validate")
+            .arg(package_dir)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !validation.status.success() {
+            return Err(String::from_utf8_lossy(&validation.stderr)
+                .trim()
+                .to_owned());
+        }
         let manifest: Value = serde_json::from_slice(
             &fs::read(package_dir.join("manifest.json")).map_err(|error| error.to_string())?,
         )
@@ -153,19 +285,31 @@ impl PublicApi {
         let state_dir = self.library_dir.join("state").join(&book_id);
         let runtime =
             WebRuntime::load(package_dir, state_dir, self.config.analyzer_command.clone())?;
-        self.lock_books()
+        let mut job = self
+            .lock_jobs()
             .map_err(|error| error.message)?
-            .insert(book_id.clone(), Arc::new(runtime));
-        self.lock_jobs().map_err(|error| error.message)?.insert(
-            book_id.clone(),
-            BookJob {
+            .get(&book_id)
+            .cloned()
+            .unwrap_or_else(|| BookJob {
                 book_id: book_id.clone(),
                 state: JobState::Ready,
                 progress_basis_points: 10_000,
                 current_stage: None,
                 error: None,
-            },
-        );
+                profile: status.profile.clone(),
+                attempt: status.attempt,
+            });
+        job.state = JobState::Ready;
+        job.progress_basis_points = 10_000;
+        job.current_stage = None;
+        job.error = None;
+        self.persist_job(&job)?;
+        self.lock_books()
+            .map_err(|error| error.message)?
+            .insert(book_id.clone(), Arc::new(runtime));
+        self.lock_jobs()
+            .map_err(|error| error.message)?
+            .insert(book_id.clone(), job);
         Ok(book_id)
     }
 
@@ -260,6 +404,11 @@ impl PublicApi {
             .split('/')
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
+        if let ["v1", "books", book_id, "retry"] = segments.as_slice() {
+            if request.method == "POST" {
+                return self.retry(book_id);
+            }
+        }
         if let ["v1", "books", book_id, "status"] = segments.as_slice() {
             if let Ok(jobs) = self.lock_jobs() {
                 if let Some(job) = jobs.get(*book_id) {
@@ -326,30 +475,21 @@ impl PublicApi {
         {
             return error_response(500, "storage_error", error.to_string(), true);
         }
-        if let Ok(mut jobs) = self.lock_jobs() {
-            jobs.insert(
-                book_id.clone(),
-                BookJob {
-                    book_id: book_id.clone(),
-                    state: JobState::Queued,
-                    progress_basis_points: 0,
-                    current_stage: Some("parse".to_owned()),
-                    error: None,
-                },
-            );
-        }
-        let api = Arc::clone(self);
-        let profile = profile.to_owned();
-        let job_book_id = book_id.clone();
-        thread::spawn(move || api.compile_job(job_book_id, book_dir, profile));
-        json_response(
-            202,
-            json!({"book_id":book_id,"status_href":format!("/v1/books/{book_id}/status")}),
-        )
+        self.queue_job(BookJob {
+            book_id,
+            state: JobState::Queued,
+            progress_basis_points: 0,
+            current_stage: None,
+            error: None,
+            profile: profile.to_owned(),
+            attempt: 1,
+        })
     }
 
     fn compile_job(self: Arc<Self>, book_id: String, book_dir: PathBuf, profile: String) {
-        self.update_job(&book_id, JobState::Processing, 1_000, Some("parse"), None);
+        if !self.update_job(&book_id, JobState::Processing, 1_000, Some("parse"), None) {
+            return;
+        }
         let package_dir = book_dir.join("package");
         let mut command = Command::new(&self.config.compiler_executable);
         command
@@ -400,19 +540,23 @@ impl PublicApi {
         progress: u16,
         stage: Option<&str>,
         error: Option<String>,
-    ) {
-        if let Ok(mut jobs) = self.lock_jobs() {
-            jobs.insert(
-                book_id.to_owned(),
-                BookJob {
-                    book_id: book_id.to_owned(),
-                    state,
-                    progress_basis_points: progress,
-                    current_stage: stage.map(str::to_owned),
-                    error,
-                },
-            );
+    ) -> bool {
+        let Ok(mut jobs) = self.lock_jobs() else {
+            return false;
+        };
+        let Some(job) = jobs.get_mut(book_id) else {
+            return false;
+        };
+        job.state = state;
+        job.progress_basis_points = progress;
+        job.current_stage = stage.map(str::to_owned);
+        job.error = error;
+        if let Err(error) = self.persist_job(job) {
+            job.state = JobState::Failed;
+            job.error = Some(error);
+            return false;
         }
+        true
     }
 
     fn delegate_to_book(&self, book_id: &str, request: &HttpRequest) -> HttpResponse {

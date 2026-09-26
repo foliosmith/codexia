@@ -354,6 +354,24 @@ pub fn analyze_book<A: ChapterAnalyzer>(
     analyzer: &A,
     options: AnalysisOptions,
 ) -> Result<Vec<ChapterAnalysis>, AnalysisError> {
+    analyze_book_inner(book, analyzer, options, None)
+}
+
+pub fn analyze_book_to_dir<A: ChapterAnalyzer>(
+    book: &BookIr,
+    analyzer: &A,
+    options: AnalysisOptions,
+    package_dir: &Path,
+) -> Result<Vec<ChapterAnalysis>, AnalysisError> {
+    analyze_book_inner(book, analyzer, options, Some(package_dir))
+}
+
+fn analyze_book_inner<A: ChapterAnalyzer>(
+    book: &BookIr,
+    analyzer: &A,
+    options: AnalysisOptions,
+    package_dir: Option<&Path>,
+) -> Result<Vec<ChapterAnalysis>, AnalysisError> {
     if options.max_parallelism == 0 {
         return Err(AnalysisError::new("max_parallelism must be at least 1"));
     }
@@ -374,6 +392,8 @@ pub fn analyze_book<A: ChapterAnalyzer>(
         return Ok(Vec::new());
     }
 
+    let blocks = crate::book_analysis::grounding_blocks(book);
+    let persistence = Mutex::new(());
     let next = AtomicUsize::new(0);
     let slots = Mutex::new(
         (0..requests.len())
@@ -389,9 +409,45 @@ pub fn analyze_book<A: ChapterAnalyzer>(
                 let Some(request) = requests.get(index) else {
                     break;
                 };
-                let result = analyzer
-                    .analyze(request)
-                    .and_then(|generated| complete_analysis(request, generated));
+                let result = (|| {
+                    let saved = package_dir.and_then(|dir| {
+                        let bytes = fs::read(dir.join("chapters").join(format!(
+                            "{}.analysis.json",
+                            request.context.chapter.chapter_id
+                        )))
+                        .ok()?;
+                        let analysis: ChapterAnalysis = serde_json::from_slice(&bytes).ok()?;
+                        (analysis.schema_version == CHAPTER_ANALYSIS_VERSION
+                            && analysis.analysis_profile == request.analysis_profile
+                            && analysis.chapter_id == request.context.chapter.chapter_id
+                            && analysis.spine_index == request.context.chapter.spine_index
+                            && analysis.source_content_hash == request.context.chapter.content_hash
+                            && validate_generated_analysis(&analysis.generated).is_ok()
+                            && crate::book_analysis::validate_chapter_grounding(&blocks, &analysis)
+                                .is_ok())
+                        .then_some(analysis)
+                    });
+                    let analysis = match saved {
+                        Some(analysis) => analysis,
+                        None => complete_analysis(request, analyzer.analyze(request)?)?,
+                    };
+                    crate::book_analysis::validate_chapter_grounding(&blocks, &analysis)?;
+                    if let Some(dir) = package_dir {
+                        write_chapter_analyses(dir, std::slice::from_ref(&analysis))?;
+                        let _guard = persistence.lock().expect("chapter persistence lock");
+                        let mut status = crate::book_analysis::read_compile_status(dir)
+                            .map_err(AnalysisError::new)?;
+                        let artifact = format!("chapters/{}.analysis.json", analysis.chapter_id);
+                        if !status.completed_artifacts.contains(&artifact) {
+                            status.completed_artifacts.push(artifact);
+                        }
+                        status.completed_artifacts.sort();
+                        status.analyzed_chapter_count = status.completed_artifacts.len();
+                        crate::book_analysis::write_compile_status(dir, &status)
+                            .map_err(AnalysisError::new)?;
+                    }
+                    Ok(analysis)
+                })();
                 slots.lock().expect("analysis result lock")[index] = Some(result);
             });
         }
@@ -431,13 +487,7 @@ pub fn write_chapter_analyses(
     let mut paths = Vec::with_capacity(analyses.len());
     for analysis in analyses {
         let path = chapters_dir.join(format!("{}.analysis.json", analysis.chapter_id));
-        let mut json = serde_json::to_vec_pretty(analysis).map_err(|error| {
-            AnalysisError::new(format!("cannot serialize {}: {error}", analysis.chapter_id))
-        })?;
-        json.push(b'\n');
-        fs::write(&path, json).map_err(|error| {
-            AnalysisError::new(format!("cannot write {}: {error}", path.display()))
-        })?;
+        crate::book_analysis::write_atomic_json(&path, analysis).map_err(AnalysisError::new)?;
         paths.push(path);
     }
     Ok(paths)

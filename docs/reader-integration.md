@@ -54,3 +54,32 @@ Use `GET /v1/usage` for request, byte and estimated-cost totals. Webhooks emit
 idempotent by `(event, book_id)`.
 
 The TypeScript reference client lives in [`sdk/typescript`](../sdk/typescript/).
+
+## 6. Recover a failed compilation
+
+The API persists each book's job in `books/<id>/job.json`. On startup it validates
+each completed package before registering it. Missing, interrupted or corrupt
+packages remain `failed` without preventing other books from loading. A failure
+is not retried automatically. With the source EPUB and analyzer available, send
+`POST /v1/books/<id>/retry` once and poll the returned status URL. Each accepted
+request starts one attempt; ready or active jobs return 409. No unbounded retry
+loop is started by the server.
+
+The compiler atomically saves individually validated chapter analyses and its
+`analysis_key`, attempt number, completed chapter artifacts, stages and error in
+`compile_status.json`. Resuming rechecks chapter metadata and grounding before
+reuse; missing or invalid chapters are regenerated. Synthesis is rerun and the
+complete package is validated before the API publishes ready. Native output-file
+locking prevents a second compiler from writing the same directory, including
+when an orphan compiler still runs after the API exits. File locking requires
+Rust 1.89 or later to build.
+
+Resume identity includes source, profile, analyze-through, analyzer executable
+content, compiler/pipeline/protocol versions, `CODEXIA_ANALYZER_MODEL`,
+`CODEXIA_ANALYZER_PROMPT_VERSION`, and optional `CODEXIA_ANALYZER_REVISION`.
+Adapters whose configuration lives elsewhere must change the revision when it
+changes. Old packages without this key remain readable but are not reused by a
+new compile. `--force` disables reuse. Profile upgrades through upload, automatic
+incremental range extension, and preserving a previous package during forced
+replacement remain separate work; retry is for failed jobs of the recorded
+profile.

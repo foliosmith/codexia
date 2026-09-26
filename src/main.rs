@@ -342,10 +342,38 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     let bytes = fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let source_hash = hex_encode(pagelet::core::ContentHash::from_bytes(&bytes).as_bytes());
     let out = PathBuf::from(&out_dir);
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(out.join(".compile.lock"))
+        .map_err(|error| error.to_string())?;
+    lock.try_lock()
+        .map_err(|error| format!("another compilation owns this output directory: {error}"))?;
 
+    let analysis_key = analyzer_command.as_ref().map(|command| -> Result<String, String> {
+        let executable = fs::read(command).map_err(|error| format!("cannot fingerprint analyzer {command}: {error}"))?;
+        let descriptor = serde_json::json!({
+            "source_hash": source_hash, "profile": chapter_analysis::profile_name(profile), "analyze_through": analyze_through,
+            "analyzer": hex_encode(pagelet::core::ContentHash::from_bytes(&executable).as_bytes()),
+            "compiler": env!("CARGO_PKG_VERSION"), "pipeline": codexia::pipeline::ANALYZER_PIPELINE_VERSION,
+            "chapter_protocol": chapter_analysis::CHAPTER_ANALYSIS_VERSION, "book_protocol": book_analysis::BOOK_ANALYSIS_VERSION,
+            "model": env::var("CODEXIA_ANALYZER_MODEL").ok(), "prompt": env::var("CODEXIA_ANALYZER_PROMPT_VERSION").ok(),
+            "revision": env::var("CODEXIA_ANALYZER_REVISION").ok(),
+        });
+        Ok(hex_encode(pagelet::core::ContentHash::from_bytes(descriptor.to_string().as_bytes()).as_bytes()))
+    }).transpose()?.unwrap_or_default();
+    let previous = book_analysis::read_compile_status(&out).ok();
+    let resume = !force
+        && previous
+            .as_ref()
+            .is_some_and(|status| !analysis_key.is_empty() && status.analysis_key == analysis_key);
     if analyzer_command.is_some()
         && !force
         && cached_package_matches(&out, &source_hash, profile, analyze_through)
+        && resume
     {
         eprintln!("Reused cached package for source_hash {source_hash} at {out_dir}/");
         return Ok(());
@@ -360,7 +388,7 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     let manifest_json = normalizer::manifest_json(&compiled.manifest);
 
     fs::create_dir_all(&out).map_err(|e| format!("cannot create directory {out_dir}: {e}"))?;
-    clear_enriched_outputs(&out)?;
+    clear_enriched_outputs(&out, resume)?;
 
     fs::write(out.join("book_ir.json"), &book_ir_json)
         .map_err(|e| format!("cannot write book_ir.json: {e}"))?;
@@ -395,62 +423,84 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
         analyzed_chapter_count: 0,
         total_analyzable_chapter_count,
         complete: false,
+        analysis_key,
+        attempt: previous
+            .as_ref()
+            .map_or(1, |status| status.attempt.saturating_add(1)),
+        completed_artifacts: Vec::new(),
+        error: None,
     };
     book_analysis::write_compile_status(&out, &status)?;
 
-    let analyzer = CommandChapterAnalyzer::new(command);
-    let analyses = chapter_analysis::analyze_book(
-        &book_ir,
-        &analyzer,
-        AnalysisOptions {
-            max_parallelism: analysis_jobs
-                .unwrap_or_else(|| AnalysisOptions::default().max_parallelism),
+    let result = (|| -> Result<(), String> {
+        let analyzer = CommandChapterAnalyzer::new(command);
+        let analyses = chapter_analysis::analyze_book_to_dir(
+            &book_ir,
+            &analyzer,
+            AnalysisOptions {
+                max_parallelism: analysis_jobs
+                    .unwrap_or_else(|| AnalysisOptions::default().max_parallelism),
+                profile,
+                analyze_through,
+            },
+            &out,
+        )
+        .map_err(|error| error.to_string())?;
+        status = book_analysis::read_compile_status(&out)?;
+        status.ready_stages.push("chapter_analysis".to_owned());
+        status.analyzed_chapter_count = analyses.len();
+        book_analysis::write_compile_status(&out, &status)?;
+
+        let synthesis = book_analysis::synthesize_book(
+            &book_ir,
+            &analyses,
+            &analyzer,
             profile,
             analyze_through,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    chapter_analysis::write_chapter_analyses(&out, &analyses).map_err(|error| error.to_string())?;
-    status.ready_stages.push("chapter_analysis".to_owned());
-    status.analyzed_chapter_count = analyses.len();
-    book_analysis::write_compile_status(&out, &status)?;
-
-    let synthesis =
-        book_analysis::synthesize_book(&book_ir, &analyses, &analyzer, profile, analyze_through)
-            .map_err(|error| error.to_string())?;
-    let documents = book_analysis::SynthesisDocuments::new(&source_hash, synthesis.clone());
-    book_analysis::write_synthesis_documents(&out, &documents)
+        )
         .map_err(|error| error.to_string())?;
-    status.ready_stages.push("book_synthesis".to_owned());
-    book_analysis::write_compile_status(&out, &status)?;
+        let documents = book_analysis::SynthesisDocuments::new(&source_hash, synthesis.clone());
+        book_analysis::write_synthesis_documents(&out, &documents)
+            .map_err(|error| error.to_string())?;
+        status.ready_stages.push("book_synthesis".to_owned());
+        book_analysis::write_compile_status(&out, &status)?;
 
-    let report = book_analysis::validate_grounding(
-        &source_hash,
-        &book_analysis::grounding_blocks(&book_ir),
-        &analyses,
-        &synthesis,
-    );
-    book_analysis::write_eval_report(&out, &report).map_err(|error| error.to_string())?;
-    if !report.valid {
-        return Err(format!(
-            "grounding validation failed; see {}/eval_report.json",
-            out.display()
-        ));
-    }
-    status.ready_stages.push("grounding_validation".to_owned());
-    status.complete = true;
-    book_analysis::write_compile_status(&out, &status)?;
+        let report = book_analysis::validate_grounding(
+            &source_hash,
+            &book_analysis::grounding_blocks(&book_ir),
+            &analyses,
+            &synthesis,
+        );
+        book_analysis::write_eval_report(&out, &report).map_err(|error| error.to_string())?;
+        if !report.valid {
+            return Err(format!(
+                "grounding validation failed; see {}/eval_report.json",
+                out.display()
+            ));
+        }
+        status.ready_stages.push("grounding_validation".to_owned());
+        status.complete = true;
+        book_analysis::write_compile_status(&out, &status)?;
 
-    let analysis_count = analyses.len();
-    let file_count = 12 + analysis_count;
-    eprintln!(
+        validate_package(&out).map_err(|errors| errors.join("\n"))?;
+        let analysis_count = analyses.len();
+        let file_count = 12 + analysis_count;
+        eprintln!(
         "Compiled {path} -> {out_dir}/ ({file_count} files, {} blocks, {} chapters, {analysis_count} analyses, profile: {}, grounding warnings: {})",
         book_ir.blocks.len(),
         book_ir.chapters.len(),
         chapter_analysis::profile_name(profile),
         report.issues.len(),
     );
-    Ok(())
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        status = book_analysis::read_compile_status(&out)?;
+        status.complete = false;
+        status.error = Some(error.clone());
+        book_analysis::write_compile_status(&out, &status)?;
+    }
+    result
 }
 
 fn cached_package_matches(
@@ -473,7 +523,7 @@ fn cached_package_matches(
         && validate_package(out).is_ok()
 }
 
-fn clear_enriched_outputs(out: &Path) -> Result<(), String> {
+fn clear_enriched_outputs(out: &Path, keep_chapters: bool) -> Result<(), String> {
     for name in [
         "compile_status.json",
         "book_map.json",
@@ -489,6 +539,9 @@ fn clear_enriched_outputs(out: &Path) -> Result<(), String> {
             fs::remove_file(&path)
                 .map_err(|error| format!("cannot replace {}: {error}", path.display()))?;
         }
+    }
+    if keep_chapters {
+        return Ok(());
     }
     let chapters_dir = out.join("chapters");
     let Ok(entries) = fs::read_dir(&chapters_dir) else {

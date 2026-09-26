@@ -823,6 +823,25 @@ pub fn grounding_blocks(book: &BookIr) -> BTreeMap<String, GroundingBlock> {
         .collect()
 }
 
+pub fn validate_chapter_grounding(
+    blocks: &BTreeMap<String, GroundingBlock>,
+    analysis: &ChapterAnalysis,
+) -> Result<(), AnalysisError> {
+    let mut validator = GroundingValidator::new(blocks);
+    validator.chapter(analysis);
+    if validator
+        .issues
+        .iter()
+        .any(|issue| issue.severity == IssueSeverity::Error)
+    {
+        return Err(AnalysisError::new(format!(
+            "invalid chapter grounding: {:?}",
+            validator.issues
+        )));
+    }
+    Ok(())
+}
+
 #[must_use]
 pub fn validate_grounding(
     source_hash: &str,
@@ -832,44 +851,7 @@ pub fn validate_grounding(
 ) -> EvalReport {
     let mut validator = GroundingValidator::new(blocks);
     for analysis in analyses {
-        let prefix = format!("chapters/{}.analysis.json", analysis.chapter_id);
-        for (index, concept) in analysis.generated.concepts.iter().enumerate() {
-            validator.refs(
-                &format!("{prefix}.concepts[{index}]"),
-                &concept.source_refs,
-                Some(analysis.spine_index),
-            );
-        }
-        for (index, claim) in analysis.generated.claims.iter().enumerate() {
-            if claim.evidence.is_empty() {
-                validator.error(
-                    "claim_without_evidence",
-                    format!("{prefix}.claims[{index}]"),
-                    "claim has no supporting evidence",
-                );
-            }
-            for (evidence_index, evidence) in claim.evidence.iter().enumerate() {
-                validator.reference(
-                    &format!("{prefix}.claims[{index}].evidence[{evidence_index}]"),
-                    &evidence.source_ref,
-                    Some(analysis.spine_index),
-                );
-            }
-        }
-        for (index, passage) in analysis.generated.difficult_passages.iter().enumerate() {
-            validator.reference(
-                &format!("{prefix}.difficult_passages[{index}]"),
-                &passage.source_ref,
-                Some(analysis.spine_index),
-            );
-        }
-        for (index, entity) in analysis.generated.entities.iter().enumerate() {
-            validator.refs(
-                &format!("{prefix}.entities[{index}]"),
-                &entity.source_refs,
-                Some(analysis.spine_index),
-            );
-        }
+        validator.chapter(analysis);
     }
     for (index, concept) in synthesis.concepts.iter().enumerate() {
         validator.refs(
@@ -983,6 +965,47 @@ impl<'a> GroundingValidator<'a> {
         }
     }
 
+    fn chapter(&mut self, analysis: &ChapterAnalysis) {
+        let prefix = format!("chapters/{}.analysis.json", analysis.chapter_id);
+        for (index, concept) in analysis.generated.concepts.iter().enumerate() {
+            self.refs(
+                &format!("{prefix}.concepts[{index}]"),
+                &concept.source_refs,
+                Some(analysis.spine_index),
+            );
+        }
+        for (index, claim) in analysis.generated.claims.iter().enumerate() {
+            if claim.evidence.is_empty() {
+                self.error(
+                    "claim_without_evidence",
+                    format!("{prefix}.claims[{index}]"),
+                    "claim has no supporting evidence",
+                );
+            }
+            for (evidence_index, evidence) in claim.evidence.iter().enumerate() {
+                self.reference(
+                    &format!("{prefix}.claims[{index}].evidence[{evidence_index}]"),
+                    &evidence.source_ref,
+                    Some(analysis.spine_index),
+                );
+            }
+        }
+        for (index, passage) in analysis.generated.difficult_passages.iter().enumerate() {
+            self.reference(
+                &format!("{prefix}.difficult_passages[{index}]"),
+                &passage.source_ref,
+                Some(analysis.spine_index),
+            );
+        }
+        for (index, entity) in analysis.generated.entities.iter().enumerate() {
+            self.refs(
+                &format!("{prefix}.entities[{index}]"),
+                &entity.source_refs,
+                Some(analysis.spine_index),
+            );
+        }
+    }
+
     fn refs(&mut self, path: &str, refs: &[AnalysisSourceRef], max_chapter: Option<u32>) {
         for (index, reference) in refs.iter().enumerate() {
             self.reference(
@@ -1067,14 +1090,26 @@ pub struct CompileStatus {
     pub analyzed_chapter_count: usize,
     pub total_analyzable_chapter_count: usize,
     pub complete: bool,
+    #[serde(default)]
+    pub analysis_key: String,
+    #[serde(default)]
+    pub attempt: u64,
+    #[serde(default)]
+    pub completed_artifacts: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+pub fn write_atomic_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)
+        .and_then(|()| fs::rename(&temporary, path))
+        .map_err(|error| format!("cannot persist {}: {error}", path.display()))
 }
 
 pub fn write_compile_status(package_dir: &Path, status: &CompileStatus) -> Result<(), String> {
-    let mut json = serde_json::to_vec_pretty(status)
-        .map_err(|error| format!("cannot serialize compile_status.json: {error}"))?;
-    json.push(b'\n');
-    fs::write(package_dir.join("compile_status.json"), json)
-        .map_err(|error| format!("cannot write compile_status.json: {error}"))
+    write_atomic_json(&package_dir.join("compile_status.json"), status)
 }
 
 pub fn read_compile_status(package_dir: &Path) -> Result<CompileStatus, String> {

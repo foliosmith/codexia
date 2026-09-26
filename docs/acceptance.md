@@ -101,3 +101,18 @@ This uses port 18791 and records actual explain/ask/checkpoint/reflect responses
 Review the saved answer to the unread-ending question against the Golden Book's
 spoiler annotations; response shape and valid citations alone cannot prove
 semantic non-disclosure.
+
+## Failure recovery (5.6.3)
+
+`tests/recovery.spec.mjs` uploads a healthy book and a book whose deterministic
+analyzer fails one chapter. It restarts the API, explicitly retries, kills only
+its own isolated process group during analysis, corrupts one saved chapter, and
+resumes. It verifies that healthy books remain available, valid chapters are
+reused, corrupt/unfinished chapters are regenerated, and incomplete or corrupt
+packages never become ready. A simultaneous compiler targeting the same output
+must fail the native file lock. Artifacts include `recovery-states.json`, the
+provider call ledger, `job.json`, and per-book `compile_status.json`.
+
+No online model is needed for this recovery test. It verifies process termination
+and restart on the tested host, not power-loss durability or multi-instance
+scheduling.

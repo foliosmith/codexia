@@ -23,6 +23,15 @@
         "responses": { "202": { "description": "Book accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BookAccepted" } } } } }
       }
     },
+    "/v1/books/{book_id}/retry": {
+      "post": {
+        "parameters": [{ "$ref": "#/components/parameters/BookId" }],
+        "responses": {
+          "202": { "description": "One explicit retry accepted; poll the book status" },
+          "409": { "description": "Job is not failed, or source/analyzer is unavailable" }
+        }
+      }
+    },
     "/v1/books/{book_id}/status": { "$ref": "#/components/pathItems/BookStatus" },
     "/v1/books/{book_id}/package": {
       "get": { "parameters": [{ "$ref": "#/components/parameters/BookId" }], "responses": { "200": { "description": "Book Package manifest" } } }
