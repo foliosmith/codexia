@@ -365,7 +365,10 @@ esac
         "claim_grounding",
         "concept_grounding",
     ] {
-        assert!(eval["metrics"][metric].is_number(), "missing {metric}");
+        assert!(
+            eval["metrics"][metric]["state"].is_string(),
+            "missing {metric}"
+        );
     }
 
     let api_key = "codexia-test-key-123456";

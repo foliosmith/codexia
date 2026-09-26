@@ -148,13 +148,99 @@ struct GoldenBook {
     snapshot: Value,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MetricState {
+    Evaluated,
+    NotEvaluated,
+    NotApplicable,
+    MissingRequired,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(from = "MetricInput")]
+struct EvalMetric {
+    state: MetricState,
+    value_basis_points: Option<u16>,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MetricInput {
+    Current {
+        state: MetricState,
+        value_basis_points: Option<u16>,
+        reason: String,
+    },
+    Legacy(u16),
+}
+
+impl From<MetricInput> for EvalMetric {
+    fn from(input: MetricInput) -> Self {
+        match input {
+            MetricInput::Current {
+                state,
+                value_basis_points,
+                reason,
+            } => Self {
+                state,
+                value_basis_points,
+                reason,
+            },
+            MetricInput::Legacy(value) => Self {
+                state: MetricState::NotEvaluated,
+                value_basis_points: None,
+                reason: format!(
+                    "Legacy metric {value}; rerun evaluation to establish applicability"
+                ),
+            },
+        }
+    }
+}
+
+impl Default for EvalMetric {
+    fn default() -> Self {
+        Self {
+            state: MetricState::NotEvaluated,
+            value_basis_points: None,
+            reason: "No artifact-bound semantic review supplied".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct SemanticCheck {
+    dimension: String,
+    expected: String,
+    observed: String,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct SemanticReview {
+    analysis_fingerprint: String,
+    annotations_fingerprint: String,
+    reviewer: String,
+    checks: Vec<SemanticCheck>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvalRequest {
+    #[serde(default)]
+    not_applicable: BTreeMap<String, String>,
+    golden_id: Option<String>,
+    semantic_review: Option<SemanticReview>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct EvalMetrics {
-    parse_quality: u16,
-    source_ref_validity: u16,
-    chapter_coverage: u16,
-    claim_grounding: u16,
-    concept_grounding: u16,
+    parse_quality: EvalMetric,
+    source_ref_validity: EvalMetric,
+    chapter_coverage: EvalMetric,
+    claim_grounding: EvalMetric,
+    concept_grounding: EvalMetric,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -165,6 +251,18 @@ struct EvalRun {
     metrics: EvalMetrics,
     findings: Vec<String>,
     regressions: Vec<String>,
+    #[serde(default)]
+    structural_valid: bool,
+    #[serde(default)]
+    beta_ready: bool,
+    #[serde(default)]
+    analysis_fingerprint: String,
+    #[serde(default)]
+    annotations_fingerprint: String,
+    #[serde(default)]
+    semantic: EvalMetric,
+    #[serde(default)]
+    semantic_review: Option<SemanticReview>,
     grounding_report: EvalReport,
 }
 
@@ -829,7 +927,7 @@ impl StudioRuntime {
         Ok(result)
     }
 
-    fn run_eval(&self) -> Result<EvalRun, StudioError> {
+    fn run_eval(&self, request: EvalRequest) -> Result<EvalRun, StudioError> {
         let mut state = self.lock()?;
         let analyses = self.effective_analyses(&state);
         let documents = self.effective_documents(&state);
@@ -890,17 +988,105 @@ impl StudioRuntime {
             .iter()
             .filter(|concept| !concept.appearances.is_empty())
             .count();
-        let metrics = EvalMetrics {
+        let mut metrics = EvalMetrics {
             parse_quality: ratio(parsed_chapters, readable_chapters.len()),
             source_ref_validity: ratio(valid_refs, grounding.stats.source_ref_count),
             chapter_coverage: ratio(analyses.len(), readable_chapters.len()),
             claim_grounding: ratio(grounded_claims, documents.claims.claims.len()),
             concept_grounding: ratio(grounded_concepts, documents.concepts.concepts.len()),
         };
+        for (name, reason) in &request.not_applicable {
+            if reason.trim().is_empty() {
+                return Err(StudioError::bad_request("applicability requires a reason"));
+            }
+            let metric = match name.as_str() {
+                "claim_grounding" => &mut metrics.claim_grounding,
+                "concept_grounding" => &mut metrics.concept_grounding,
+                _ => {
+                    return Err(StudioError::bad_request(
+                        "only claims or concepts can be not applicable",
+                    ))
+                }
+            };
+            if metric.state == MetricState::MissingRequired {
+                *metric = EvalMetric {
+                    state: MetricState::NotApplicable,
+                    value_basis_points: None,
+                    reason: reason.clone(),
+                };
+            } else {
+                return Err(StudioError::bad_request(
+                    "existing output must be evaluated",
+                ));
+            }
+        }
+        let analysis_fingerprint = fingerprint(
+            &json!({"source_hash": self.package.source_hash, "analyses": analyses, "documents": documents.generated()}),
+        )?;
+        let annotations = request
+            .golden_id
+            .as_ref()
+            .map(|id| {
+                state
+                    .golden_books
+                    .get(id)
+                    .filter(|golden| golden.source_hash == self.package.source_hash)
+                    .ok_or_else(|| StudioError::bad_request("unknown Golden Book for this source"))
+            })
+            .transpose()?;
+        let annotations_fingerprint = annotations
+            .map(|golden| fingerprint(&golden.annotations))
+            .transpose()?
+            .unwrap_or_default();
+        let semantic = if let Some(review) = &request.semantic_review {
+            let golden = annotations.ok_or_else(|| {
+                StudioError::bad_request("semantic review requires Golden Book annotations")
+            })?;
+            if golden
+                .annotations
+                .as_object()
+                .is_none_or(|value| value.is_empty())
+                || review.reviewer.trim().is_empty()
+                || review.analysis_fingerprint != analysis_fingerprint
+                || review.annotations_fingerprint != annotations_fingerprint
+            {
+                return Err(StudioError::bad_request("semantic review is missing attribution or is stale for these artifacts/annotations"));
+            }
+            let dimensions = ["citation_support", "key_point_coverage", "spoiler_boundary"];
+            if review.checks.iter().any(|check| {
+                !dimensions.contains(&check.dimension.as_str())
+                    || check.expected.trim().is_empty()
+                    || check.observed.trim().is_empty()
+            }) || dimensions.iter().any(|dimension| {
+                !review
+                    .checks
+                    .iter()
+                    .any(|check| &check.dimension == dimension)
+            }) {
+                return Err(StudioError::bad_request("semantic review requires citation support, key point coverage and spoiler checks with expected/observed evidence"));
+            }
+            let mut result = ratio(
+                review.checks.iter().filter(|check| check.passed).count(),
+                review.checks.len(),
+            );
+            result.reason = "Attributed sample review against Golden Book annotations; not exhaustive semantic verification".to_owned();
+            result
+        } else {
+            EvalMetric::default()
+        };
+        let evidence_valid = grounding.valid
+            && metric_pairs(&metrics)
+                .iter()
+                .all(|(_, metric)| metric.state != MetricState::MissingRequired);
         let mut findings = Vec::new();
         for (name, value) in metric_pairs(&metrics) {
-            if value < 8_000 {
-                findings.push(format!("{name} is below 80%: {value} basis points"));
+            if value.state == MetricState::MissingRequired
+                || value.value_basis_points.is_some_and(|score| score < 8_000)
+            {
+                findings.push(format!(
+                    "{name}: {} ({:?})",
+                    value.reason, value.value_basis_points
+                ));
             }
         }
         findings.extend(
@@ -917,7 +1103,13 @@ impl StudioRuntime {
         let run = EvalRun {
             run_id: state.id("eval"),
             revision: state.revision,
-            valid: grounding.valid,
+            valid: evidence_valid,
+            structural_valid: grounding.valid,
+            beta_ready: evidence_valid && semantic.value_basis_points == Some(10_000),
+            analysis_fingerprint,
+            annotations_fingerprint,
+            semantic,
+            semantic_review: request.semantic_review,
             metrics,
             findings,
             regressions,
@@ -981,7 +1173,9 @@ impl StudioRuntime {
                 let state = self.lock()?;
                 StudioResponse::json(200, &state.eval_runs)
             }
-            ["evals"] if method == "POST" => StudioResponse::json(201, self.run_eval()?),
+            ["evals"] if method == "POST" => {
+                StudioResponse::json(201, self.run_eval(json_body(body)?)?)
+            }
             ["evals", run_id] if method == "GET" => {
                 let state = self.lock()?;
                 let run = state
@@ -996,21 +1190,30 @@ impl StudioRuntime {
     }
 }
 
-fn ratio(numerator: usize, denominator: usize) -> u16 {
-    numerator
-        .saturating_mul(10_000)
-        .checked_div(denominator)
-        .unwrap_or(10_000)
-        .min(10_000) as u16
+fn fingerprint(value: &impl Serialize) -> Result<String, StudioError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|error| StudioError::internal(error.to_string()))?;
+    Ok(pagelet::core::ContentHash::from_bytes(&bytes)
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
-fn metric_pairs(metrics: &EvalMetrics) -> [(&'static str, u16); 5] {
+fn ratio(numerator: usize, denominator: usize) -> EvalMetric {
+    match numerator.saturating_mul(10_000).checked_div(denominator) {
+        None => EvalMetric { state: MetricState::MissingRequired, value_basis_points: None, reason: "Required output has no samples; declare justified non-applicability for optional output".to_owned() },
+        Some(value) => EvalMetric { state: MetricState::Evaluated, value_basis_points: Some(value.min(10_000) as u16), reason: format!("{numerator}/{denominator} structural samples; not a semantic correctness score") },
+    }
+}
+
+fn metric_pairs(metrics: &EvalMetrics) -> [(&'static str, &EvalMetric); 5] {
     [
-        ("parse_quality", metrics.parse_quality),
-        ("source_ref_validity", metrics.source_ref_validity),
-        ("chapter_coverage", metrics.chapter_coverage),
-        ("claim_grounding", metrics.claim_grounding),
-        ("concept_grounding", metrics.concept_grounding),
+        ("parse_quality", &metrics.parse_quality),
+        ("source_ref_validity", &metrics.source_ref_validity),
+        ("chapter_coverage", &metrics.chapter_coverage),
+        ("claim_grounding", &metrics.claim_grounding),
+        ("concept_grounding", &metrics.concept_grounding),
     ]
 }
 
@@ -1018,8 +1221,17 @@ fn metric_regressions(previous: &EvalMetrics, current: &EvalMetrics) -> Vec<Stri
     metric_pairs(previous)
         .into_iter()
         .zip(metric_pairs(current))
-        .filter(|((_, before), (_, after))| after < before)
-        .map(|((name, before), (_, after))| format!("{name} regressed from {before} to {after}"))
+        .filter(|((_, before), (_, after))| {
+            before.value_basis_points.is_some()
+                && (after.state == MetricState::MissingRequired
+                    || after.value_basis_points < before.value_basis_points)
+        })
+        .map(|((name, before), (_, after))| {
+            format!(
+                "{name} regressed from {:?} to {:?}",
+                before.value_basis_points, after.value_basis_points
+            )
+        })
         .collect()
 }
 

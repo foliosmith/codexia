@@ -5,6 +5,7 @@ every registered Golden Book and every completed profile through the existing
 Studio Eval Pipeline:
 
 ```sh
+CODEXIA_SEMANTIC_REVIEW=<artifact-bound-review.json> \
 node scripts/accept-quality.mjs private/golden-books/catalog.json \
   private/acceptance/online/report.json private/acceptance/baseline
 ```
@@ -35,10 +36,12 @@ replacing a baseline.
 Check a candidate against that frozen baseline:
 
 ```sh
+CODEXIA_SEMANTIC_REVIEW=<artifact-bound-review.json> \
 node scripts/accept-quality.mjs private/golden-books/catalog.json \
   <candidate-report.json> private/acceptance/candidate-check \
   private/acceptance/baseline/report.json &&
-CODEXIA_ONLINE_REPORT=<candidate-report.json> npm --prefix tests run e2e
+CODEXIA_ONLINE_REPORT=<candidate-report.json> \
+CODEXIA_SEMANTIC_REVIEW=<artifact-bound-review.json> npm --prefix tests run e2e
 ```
 
 The gate returns nonzero and writes `passed: false` when evidence, quality, cost or
@@ -54,3 +57,58 @@ ledger also includes failed/exploratory calls with known usage and lists attempt
 whose usage is unavailable. Neither number should be described as a reconciled
 account bill. The current Beta accounting basis is token usage plus this explicit
 estimate; invoice reconciliation remains unverified.
+
+## Evaluation 0.2
+
+Studio metrics now return `{state, value_basis_points, reason}`. States are
+`evaluated`, `not_evaluated`, `not_applicable`, and `missing_required`. Only
+`evaluated` has a numeric score. Old numeric Studio history is displayed as
+unassessed legacy evidence and must be reevaluated; frozen numeric online
+baselines remain comparable to newly evaluated scores without rewriting them.
+
+By default all profiles require chapters, citations, concepts and claims. For a
+book/task that intentionally omits claims or concepts, POST `/v1/studio/evals`
+with `not_applicable: {claim_grounding: "reviewed reason"}` (or
+`concept_grounding`). Existing output must still be evaluated; citations and
+parsing cannot be waived. The online Beta corpus continues to require nonempty
+claims and concepts for every accepted profile.
+
+`structural_valid` reports the source-reference checks; `valid` additionally
+requires the configured outputs. `beta_ready` also requires a complete passing
+semantic sample review. None of these structural percentages measures semantic
+accuracy. Studio's button runs structural evaluation only.
+
+Register the reference annotations through `/v1/studio/golden-books`, then POST
+`{golden_id}` to `/v1/studio/evals`. Record the returned `analysis_fingerprint` and
+`annotations_fingerprint`. A subsequent request may include `semantic_review`:
+
+```json
+{
+  "golden_id": "returned-golden-id",
+  "semantic_review": {
+    "analysis_fingerprint": "returned-analysis-fingerprint",
+    "annotations_fingerprint": "returned-annotations-fingerprint",
+    "reviewer": "reviewer and date",
+    "checks": [
+      {"dimension":"citation_support","expected":"reference expectation","observed":"inspected passage and conclusion","passed":true},
+      {"dimension":"key_point_coverage","expected":"manual key points","observed":"inspected coverage and scope","passed":true},
+      {"dimension":"spoiler_boundary","expected":"excluded later facts","observed":"inspected bounded answer or checkpoint","passed":true}
+    ]
+  }
+}
+```
+
+These are attributed review judgments, not an automated semantic oracle. Include
+sample locations and limitations in `observed`; do not claim whole-book coverage
+from samples. A changed analysis or changed annotation invalidates the review.
+A legitimate citation that contradicts the answer, missing key points, or later
+facts in a bounded answer must be recorded as failed checks. Input scope alone
+cannot suppress knowledge already present in the model.
+
+Supply the reviewed samples to the existing quality gate with
+`CODEXIA_SEMANTIC_REVIEW=<review.json>`. Its file shape is
+`{"reviews":[{"book_id":"...","profile":"standard","review":{...}}]}`;
+`review` is the `semantic_review` object above. Every online book/profile requires
+its own matching review. Missing, stale, or failed reviews block the gate;
+registration-only books remain unassessed and cannot establish a Beta baseline.
+This requirement applies to both initial baselines and frozen-baseline checks.

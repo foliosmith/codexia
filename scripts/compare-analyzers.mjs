@@ -41,7 +41,7 @@ try {
   assert.ok(report.versions.length >= 2);
   assert.ok(report.diff.length > 0);
   assert.equal(report.after.valid, true);
-  assert.equal(report.after.metrics.source_ref_validity, 10_000);
+  assert.equal(report.after.metrics.source_ref_validity.value_basis_points, 10_000);
   report.passed = true;
 } catch (error) {
   report.error = String(error);

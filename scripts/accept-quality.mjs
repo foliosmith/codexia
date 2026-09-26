@@ -21,9 +21,13 @@ function estimate(usage) {
 }
 const catalog = read(catalogPath);
 const online = read(onlinePath);
+const semanticPath = process.env.CODEXIA_SEMANTIC_REVIEW;
+const semanticReviews = semanticPath ? read(semanticPath).reviews : [];
 const root = resolve(outputPath);
 mkdirSync(root, { recursive: true });
 const report = {
+  schema_version: "0.2",
+  semantic_review: semanticPath ? resolve(semanticPath) : null,
   created_at: new Date().toISOString(),
   online_report: resolve(onlinePath),
   pricing: { source: "https://developers.openai.com/api/docs/pricing", retrieved_at: "2026-09-26", currency: "USD", rates_per_million: rates, long_context_above_input_tokens: 272_000, basis: "API Standard equivalent estimate, not a ChatGPT subscription invoice" },
@@ -57,8 +61,11 @@ try {
         await delay(100);
       }
       assert.ok(ready, `Studio did not start: ${log}`);
-      const response = await fetch("http://127.0.0.1:18789/v1/studio/evals", { method: "POST", body: "{}", signal: AbortSignal.timeout(10_000) });
-      assert.ok(response.ok);
+      const goldenResponse = await fetch("http://127.0.0.1:18789/v1/studio/golden-books", {method:"POST",body:JSON.stringify({label:book.id,annotations:book.annotations})});
+      assert.ok(goldenResponse.ok); const golden = await goldenResponse.json();
+      const semantic = semanticReviews.find(item => item.book_id === book.id && item.profile === run?.profile);
+      const response = await fetch("http://127.0.0.1:18789/v1/studio/evals", { method: "POST", body: JSON.stringify({golden_id:golden.golden_id, semantic_review:semantic?.review}), signal: AbortSignal.timeout(10_000) });
+      assert.ok(response.ok, `semantic review or evaluation rejected: ${await response.clone().text()}`);
       const evaluation = await response.json();
       const sampleSizes = {
         source_refs: evaluation.grounding_report.stats.source_ref_count,
@@ -68,9 +75,10 @@ try {
       const result = { book_id: book.id, profile: run?.profile || "registration", evidence: run ? "online" : "offline-registration-only", package: resolve(packageDir), sample_sizes: sampleSizes, evaluation };
       report.books.push(result);
       writeFileSync(join(stateDir, "quality.json"), `${JSON.stringify(result, null, 2)}\n`);
-      assert.equal(evaluation.valid, true, `${book.id}: grounding`);
+      assert.equal(evaluation.structural_valid, true, `${book.id}: grounding`);
       if (run) {
-        assert.equal(evaluation.metrics.source_ref_validity, 10_000);
+        assert.equal(evaluation.metrics.source_ref_validity.value_basis_points, 10_000);
+        assert.equal(evaluation.valid, true, `${book.id}: required outputs`);
         assert.ok(evaluation.grounding_report.stats.source_ref_count > 0, "online evidence must have citations");
         assert.ok(sampleSizes.concepts > 0 && sampleSizes.claims > 0, "empty outputs cannot establish analysis quality");
       }
@@ -114,6 +122,7 @@ try {
   assert.ok(standardBooks.size >= 3, "at least three distinct standard books are required");
   assert.ok(report.runs.some((run) => run.profile === "deep" && run.passed && standardBooks.has(run.book_id)), "a deep run of a standard book is required");
   assert.ok(report.runs.some((run) => run.profile === "basic" && run.passed), "basic profile evidence is required");
+  assert.ok(report.books.filter(book => book.evidence === "online").every(book => book.evaluation.beta_ready), "artifact-bound semantic review is required for every online book/profile");
   if (baselinePath) {
     const baseline = read(baselinePath);
     for (const limit of baseline.thresholds.runs) assert.ok(report.runs.some((run) => run.book_id === limit.book_id && run.profile === limit.profile && run.passed), `${limit.book_id}/${limit.profile}: baseline case missing`);
@@ -126,7 +135,11 @@ try {
     for (const book of report.books.filter((book) => book.evidence === "online")) {
       const minimum = baseline.thresholds.books.find((item) => item.book_id === book.book_id && item.profile === book.profile);
       assert.ok(minimum, `${book.book_id}: quality baseline missing`);
-      for (const [metric, value] of Object.entries(minimum.minimum_metrics)) assert.ok(book.evaluation.metrics[metric] >= value, `${book.book_id}: ${metric} regression`);
+      for (const [metric, value] of Object.entries(minimum.minimum_metrics)) {
+        const minimumValue = typeof value === "number" ? value : value.value_basis_points;
+        const current = book.evaluation.metrics[metric];
+        assert.ok(current && (minimumValue == null ? current.state === value.state : current.state === "evaluated" && current.value_basis_points >= minimumValue), `${book.book_id}: ${metric} regression`);
+      }
     }
   } else {
     assert.ok(online.runs.every((run) => !run.initial_cache_hit), "a cold-generation report is required to set performance thresholds");
