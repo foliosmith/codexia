@@ -326,6 +326,31 @@ impl ChapterAnalyzer for CommandAnalyzer {
     }
 }
 
+pub fn analysis_key(
+    source_hash: &str,
+    profile: &str,
+    analyze_through: Option<u32>,
+    executable: &Path,
+) -> Result<String, String> {
+    let bytes =
+        fs::read(executable).map_err(|error| format!("cannot fingerprint analyzer: {error}"))?;
+    let hash = |bytes: &[u8]| {
+        pagelet::core::ContentHash::from_bytes(bytes)
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let descriptor = serde_json::json!({
+        "source_hash":source_hash,"profile":profile,"analyze_through":analyze_through,"analyzer":hash(&bytes),
+        "compiler":env!("CARGO_PKG_VERSION"),"pipeline":crate::pipeline::ANALYZER_PIPELINE_VERSION,
+        "chapter_protocol":CHAPTER_ANALYSIS_VERSION,"chapter_prompt":CHAPTER_ANALYSIS_SYSTEM_PROMPT,"chapter_schema":OUTPUT_SCHEMA,"tasks":PROMPT_TASKS,
+        "synthesis":crate::book_analysis::synthesis_signature(),
+        "model":std::env::var("CODEXIA_ANALYZER_MODEL").ok(),"prompt":std::env::var("CODEXIA_ANALYZER_PROMPT_VERSION").ok(),"revision":std::env::var("CODEXIA_ANALYZER_REVISION").ok()
+    });
+    Ok(hash(descriptor.to_string().as_bytes()))
+}
+
 /// Parallel execution settings for a chapter-analysis run.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct AnalysisOptions {

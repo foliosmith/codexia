@@ -79,7 +79,19 @@ content, compiler/pipeline/protocol versions, `CODEXIA_ANALYZER_MODEL`,
 `CODEXIA_ANALYZER_PROMPT_VERSION`, and optional `CODEXIA_ANALYZER_REVISION`.
 Adapters whose configuration lives elsewhere must change the revision when it
 changes. Old packages without this key remain readable but are not reused by a
-new compile. `--force` disables reuse. Profile upgrades through upload, automatic
-incremental range extension, and preserving a previous package during forced
-replacement remain separate work; retry is for failed jobs of the recorded
-profile.
+new compile. `--force` disables reuse. Uploads compare the same analysis identity as the CLI. A different profile or
+adapter version creates a separate candidate under `versions/<analysis_key>/`.
+Only a validated candidate replaces `active.json`; an unsuccessful upgrade keeps
+the previous runtime and package readable, including after restart. Status
+reports the attempted `profile` and `analysis_key`, plus `active_profile` when a
+previous package remains available. Repeating an active identical request reuses
+the job; a conflicting active variant returns 409. Retry uses the recorded profile
+and the current adapter identity.
+
+CLI replacement builds beside the destination in `.NAME.pending` and preserves
+the prior package until validation succeeds. Publication uses `.NAME.previous`
+for rollback and a sibling native file lock. If interrupted between directory
+renames, the next compiler run restores a missing destination from that backup.
+A leftover backup alongside a destination is reported for explicit recovery,
+rather than silently deleted. Do not store unrelated files in these reserved
+compiler paths. Automatic incremental range extension remains separate work.

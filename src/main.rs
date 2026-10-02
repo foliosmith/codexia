@@ -342,29 +342,44 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     let bytes = fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let source_hash = hex_encode(pagelet::core::ContentHash::from_bytes(&bytes).as_bytes());
     let out = PathBuf::from(&out_dir);
-    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let name = out
+        .file_name()
+        .ok_or_else(|| "output must name a package directory".to_owned())?
+        .to_string_lossy();
+    let backup = out.with_file_name(format!(".{name}.previous"));
+    let pending = out.with_file_name(format!(".{name}.pending"));
+    fs::create_dir_all(
+        out.parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )
+    .map_err(|error| error.to_string())?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(out.join(".compile.lock"))
+        .open(out.with_file_name(format!(".{name}.compile.lock")))
         .map_err(|error| error.to_string())?;
     lock.try_lock()
         .map_err(|error| format!("another compilation owns this output directory: {error}"))?;
 
-    let analysis_key = analyzer_command.as_ref().map(|command| -> Result<String, String> {
-        let executable = fs::read(command).map_err(|error| format!("cannot fingerprint analyzer {command}: {error}"))?;
-        let descriptor = serde_json::json!({
-            "source_hash": source_hash, "profile": chapter_analysis::profile_name(profile), "analyze_through": analyze_through,
-            "analyzer": hex_encode(pagelet::core::ContentHash::from_bytes(&executable).as_bytes()),
-            "compiler": env!("CARGO_PKG_VERSION"), "pipeline": codexia::pipeline::ANALYZER_PIPELINE_VERSION,
-            "chapter_protocol": chapter_analysis::CHAPTER_ANALYSIS_VERSION, "book_protocol": book_analysis::BOOK_ANALYSIS_VERSION,
-            "model": env::var("CODEXIA_ANALYZER_MODEL").ok(), "prompt": env::var("CODEXIA_ANALYZER_PROMPT_VERSION").ok(),
-            "revision": env::var("CODEXIA_ANALYZER_REVISION").ok(),
-        });
-        Ok(hex_encode(pagelet::core::ContentHash::from_bytes(descriptor.to_string().as_bytes()).as_bytes()))
-    }).transpose()?.unwrap_or_default();
+    if !out.exists() && backup.exists() {
+        fs::rename(&backup, &out).map_err(|error| error.to_string())?;
+    }
+    fs::create_dir_all(&out).map_err(|error| error.to_string())?;
+    let analysis_key = analyzer_command
+        .as_ref()
+        .map(|command| {
+            chapter_analysis::analysis_key(
+                &source_hash,
+                chapter_analysis::profile_name(profile),
+                analyze_through,
+                Path::new(command),
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
     let previous = book_analysis::read_compile_status(&out).ok();
     let resume = !force
         && previous
@@ -379,6 +394,15 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    let protected =
+        previous.as_ref().is_some_and(|status| status.complete) && validate_package(&out).is_ok();
+    let target = out.clone();
+    let out = if protected { pending } else { out };
+    let previous = book_analysis::read_compile_status(&out).ok().or(previous);
+    let resume = !force
+        && previous
+            .as_ref()
+            .is_some_and(|status| !analysis_key.is_empty() && status.analysis_key == analysis_key);
     let book_ir = epub_parser::parse_epub(&bytes)?;
     let book_ir_json = ir::book_ir_to_json(&book_ir);
 
@@ -499,6 +523,30 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
         status.complete = false;
         status.error = Some(error.clone());
         book_analysis::write_compile_status(&out, &status)?;
+    }
+    if result.is_ok() && protected {
+        if backup.exists() {
+            return Err(format!(
+                "previous package backup needs recovery: {}",
+                backup.display()
+            ));
+        }
+        fs::rename(&target, &backup)
+            .map_err(|error| format!("cannot preserve previous package: {error}"))?;
+        if let Err(error) = fs::rename(&out, &target) {
+            fs::rename(&backup, &target).map_err(|restore| {
+                format!(
+                    "publish failed: {error}; restore failed: {restore}; previous package at {}",
+                    backup.display()
+                )
+            })?;
+            return Err(format!(
+                "publish failed; previous package restored: {error}"
+            ));
+        }
+        fs::remove_dir_all(&backup).map_err(|error| {
+            format!("published package; previous backup cleanup failed: {error}")
+        })?;
     }
     result
 }

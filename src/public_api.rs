@@ -69,6 +69,36 @@ struct BookJob {
     profile: String,
     #[serde(default)]
     attempt: u64,
+    #[serde(default)]
+    analysis_key: String,
+    #[serde(default = "default_package_path")]
+    package_path: String,
+    #[serde(default)]
+    active_profile: Option<String>,
+}
+
+fn default_package_path() -> String {
+    "package".to_owned()
+}
+
+#[derive(Serialize, Deserialize)]
+struct ActivePackage {
+    path: String,
+}
+
+fn package_path(book_dir: &Path, relative: &str) -> Result<PathBuf, String> {
+    if relative != "package" {
+        let parts = relative.split('/').collect::<Vec<_>>();
+        if parts.len() != 3
+            || parts[0] != "versions"
+            || parts[2] != "package"
+            || parts[1].len() != 64
+            || !parts[1].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("invalid persisted package path".to_owned());
+        }
+    }
+    Ok(book_dir.join(relative))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -144,43 +174,80 @@ impl PublicApi {
             let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let package = path.join("package");
-            let status = read_compile_status(&package).ok();
+            let active = if path.join("active.json").exists() {
+                fs::read(path.join("active.json"))
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<ActivePackage>(&bytes)
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|active| package_path(&path, &active.path))
+            } else {
+                Ok(path.join("package"))
+            };
+            let status = active
+                .as_ref()
+                .ok()
+                .and_then(|active| read_compile_status(active).ok());
             let saved = fs::read(path.join("job.json"))
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<BookJob>(&bytes).ok());
-            let job = saved
-                .filter(|job| job.book_id == id)
-                .unwrap_or_else(|| BookJob {
-                    book_id: id.to_owned(),
-                    state: JobState::Failed,
-                    progress_basis_points: 0,
-                    current_stage: None,
-                    error: None,
-                    profile: status
-                        .as_ref()
-                        .map_or_else(|| "standard".to_owned(), |status| status.profile.clone()),
-                    attempt: status.as_ref().map_or(0, |status| status.attempt),
-                });
+                .and_then(|bytes| serde_json::from_slice::<BookJob>(&bytes).ok())
+                .filter(|job| job.book_id == id);
+            let mut job = saved.unwrap_or_else(|| BookJob {
+                book_id: id.to_owned(),
+                state: if status.as_ref().is_some_and(|s| s.complete) {
+                    JobState::Ready
+                } else {
+                    JobState::Failed
+                },
+                progress_basis_points: 0,
+                current_stage: None,
+                error: None,
+                profile: status
+                    .as_ref()
+                    .map_or_else(|| "standard".to_owned(), |s| s.profile.clone()),
+                attempt: status.as_ref().map_or(0, |s| s.attempt),
+                analysis_key: status
+                    .as_ref()
+                    .map_or_else(String::new, |s| s.analysis_key.clone()),
+                package_path: "package".to_owned(),
+                active_profile: None,
+            });
             self.lock_jobs()
                 .map_err(|error| error.message)?
-                .insert(id.to_owned(), job);
-            let result = if status
-                .as_ref()
-                .is_some_and(|status| status.source_hash.chars().take(16).collect::<String>() != id)
-            {
-                Err("package identity does not match library directory".to_owned())
-            } else {
-                self.register_package(&package)
-            };
-            if let Err(error) = result {
-                self.update_job(
-                    id,
-                    JobState::Failed,
-                    0,
-                    None,
-                    Some(format!("Recovery required: {error}")),
-                );
+                .insert(id.to_owned(), job.clone());
+            let result = active.and_then(|active| {
+                let status = read_compile_status(&active)?;
+                if status.source_hash.chars().take(16).collect::<String>() != id {
+                    return Err("package identity does not match library directory".to_owned());
+                }
+                self.register_package(&active).map(|_| status)
+            });
+            match result {
+                Ok(status) if status.analysis_key == job.analysis_key => {}
+                Ok(status) => {
+                    job.active_profile = Some(status.profile);
+                    if job.state != JobState::Failed {
+                        job.error = Some(
+                            "previous analysis attempt was interrupted; active package preserved"
+                                .to_owned(),
+                        );
+                    }
+                    job.state = JobState::Failed;
+                    self.persist_job(&job)?;
+                    self.lock_jobs()
+                        .map_err(|error| error.message)?
+                        .insert(id.to_owned(), job);
+                }
+                Err(error) => {
+                    self.update_job(
+                        id,
+                        JobState::Failed,
+                        0,
+                        None,
+                        Some(format!("Recovery required: {error}")),
+                    );
+                }
             }
         }
         Ok(())
@@ -204,6 +271,14 @@ impl PublicApi {
                 if jobs.get(&id).is_some_and(|existing| {
                     matches!(existing.state, JobState::Queued | JobState::Processing)
                 }) {
+                    if jobs[&id].analysis_key != job.analysis_key {
+                        return error_response(
+                            409,
+                            "analysis_in_progress",
+                            "another analysis variant is in progress",
+                            true,
+                        );
+                    }
                     return json_response(
                         202,
                         json!({"book_id":id,"status_href":format!("/v1/books/{id}/status")}),
@@ -219,7 +294,13 @@ impl PublicApi {
         let api = Arc::clone(self);
         let dir = self.library_dir.join("books").join(&id);
         let worker_id = id.clone();
-        thread::spawn(move || api.compile_job(worker_id, dir, profile));
+        let output = self.lock_jobs().expect("job lock")[&id]
+            .package_path
+            .clone();
+        let expected_key = self.lock_jobs().expect("job lock")[&id]
+            .analysis_key
+            .clone();
+        thread::spawn(move || api.compile_job(worker_id, dir, profile, output, expected_key));
         json_response(
             202,
             json!({"book_id":id,"status_href":format!("/v1/books/{id}/status")}),
@@ -251,6 +332,24 @@ impl PublicApi {
                 "retry requires the source EPUB and analyzer",
                 false,
             );
+        }
+        let bytes = match fs::read(self.library_dir.join("books").join(id).join("source.epub")) {
+            Ok(bytes) => bytes,
+            Err(error) => return error_response(500, "storage_error", error.to_string(), true),
+        };
+        let source_hash = hex_encode(pagelet::core::ContentHash::from_bytes(&bytes).as_bytes());
+        let key = match crate::chapter_analysis::analysis_key(
+            &source_hash,
+            &job.profile,
+            None,
+            self.config.analyzer_command.as_ref().unwrap(),
+        ) {
+            Ok(key) => key,
+            Err(error) => return error_response(409, "analyzer_unavailable", error, false),
+        };
+        if key != job.analysis_key {
+            job.package_path = format!("versions/{key}/package");
+            job.analysis_key = key;
         }
         job.attempt = job.attempt.saturating_add(1);
         self.queue_job(job)
@@ -298,7 +397,25 @@ impl PublicApi {
                 error: None,
                 profile: status.profile.clone(),
                 attempt: status.attempt,
+                analysis_key: status.analysis_key.clone(),
+                package_path: "package".to_owned(),
+                active_profile: None,
             });
+        job.profile = status.profile.clone();
+        job.analysis_key = status.analysis_key.clone();
+        job.active_profile = Some(status.profile.clone());
+        let book_dir = self.library_dir.join("books").join(&book_id);
+        if let Ok(relative) = package_dir.strip_prefix(&book_dir) {
+            let relative = relative.to_string_lossy().to_string();
+            package_path(&book_dir, &relative)?;
+            write_atomic_json(
+                &book_dir.join("active.json"),
+                &ActivePackage {
+                    path: relative.clone(),
+                },
+            )?;
+            job.package_path = relative;
+        }
         job.state = JobState::Ready;
         job.progress_basis_points = 10_000;
         job.current_stage = None;
@@ -459,15 +576,34 @@ impl PublicApi {
         let source_hash =
             hex_encode(pagelet::core::ContentHash::from_bytes(&request.body).as_bytes());
         let book_id = source_hash.chars().take(16).collect::<String>();
-        if self
-            .lock_jobs()
-            .ok()
-            .is_some_and(|jobs| jobs.contains_key(&book_id))
-        {
-            return json_response(
-                202,
-                json!({"book_id":book_id,"status_href":format!("/v1/books/{book_id}/status")}),
-            );
+        let key = match crate::chapter_analysis::analysis_key(
+            &source_hash,
+            profile,
+            None,
+            self.config.analyzer_command.as_ref().unwrap(),
+        ) {
+            Ok(key) => key,
+            Err(error) => return error_response(409, "analyzer_unavailable", error, false),
+        };
+        let existing = match self.lock_jobs() {
+            Ok(jobs) => jobs.get(&book_id).cloned(),
+            Err(error) => return error_response(error.status, error.code, error.message, true),
+        };
+        if let Some(job) = &existing {
+            if job.analysis_key == key && job.state != JobState::Failed {
+                return json_response(
+                    202,
+                    json!({"book_id":book_id,"status_href":format!("/v1/books/{book_id}/status")}),
+                );
+            }
+            if matches!(job.state, JobState::Queued | JobState::Processing) {
+                return error_response(
+                    409,
+                    "analysis_in_progress",
+                    "another analysis variant is in progress",
+                    true,
+                );
+            }
         }
         let book_dir = self.library_dir.join("books").join(&book_id);
         if let Err(error) = fs::create_dir_all(&book_dir)
@@ -482,15 +618,40 @@ impl PublicApi {
             current_stage: None,
             error: None,
             profile: profile.to_owned(),
-            attempt: 1,
+            attempt: existing.as_ref().map_or(1, |job| job.attempt + 1),
+            analysis_key: key.clone(),
+            package_path: existing.as_ref().map_or_else(
+                || "package".to_owned(),
+                |job| {
+                    if job.analysis_key == key {
+                        job.package_path.clone()
+                    } else {
+                        format!("versions/{key}/package")
+                    }
+                },
+            ),
+            active_profile: existing.and_then(|job| job.active_profile),
         })
     }
 
-    fn compile_job(self: Arc<Self>, book_id: String, book_dir: PathBuf, profile: String) {
+    fn compile_job(
+        self: Arc<Self>,
+        book_id: String,
+        book_dir: PathBuf,
+        profile: String,
+        relative: String,
+        expected_key: String,
+    ) {
         if !self.update_job(&book_id, JobState::Processing, 1_000, Some("parse"), None) {
             return;
         }
-        let package_dir = book_dir.join("package");
+        let package_dir = match package_path(&book_dir, &relative) {
+            Ok(path) => path,
+            Err(error) => {
+                self.fail_job(&book_id, error);
+                return;
+            }
+        };
         let mut command = Command::new(&self.config.compiler_executable);
         command
             .arg("compile")
@@ -504,7 +665,13 @@ impl PublicApi {
         }
         let result = command.output();
         match result {
-            Ok(output) if output.status.success() => match self.register_package(&package_dir) {
+            Ok(output) if output.status.success() => match read_compile_status(&package_dir)
+                .and_then(|status| {
+                    if status.analysis_key != expected_key {
+                        return Err("analyzer identity changed during compilation".to_owned());
+                    }
+                    self.register_package(&package_dir)
+                }) {
                 Ok(_) => {
                     self.update_job(&book_id, JobState::Ready, 10_000, None, None);
                     self.record_compile_cost();

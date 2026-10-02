@@ -343,6 +343,10 @@ impl SynthesisDocuments {
     }
 }
 
+pub(crate) fn synthesis_signature() -> serde_json::Value {
+    serde_json::json!({"version":BOOK_ANALYSIS_VERSION,"system":SYSTEM_PROMPT,"tasks":PROMPT_TASKS,"schema":output_schema()})
+}
+
 pub fn synthesize_book(
     book: &BookIr,
     analyses: &[ChapterAnalysis],
