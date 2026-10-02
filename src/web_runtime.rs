@@ -6,7 +6,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -338,6 +341,7 @@ struct AgentRequest {
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct ExplainActionRequest {
+    request_id: Option<String>,
     selected_text: String,
     source_ref: AnalysisSourceRef,
     reader_state: ReaderState,
@@ -352,6 +356,7 @@ fn default_explain_intent() -> String {
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct AskActionRequest {
+    request_id: Option<String>,
     question: String,
     reader_state: ReaderState,
     spoiler_mode: SpoilerMode,
@@ -359,6 +364,7 @@ struct AskActionRequest {
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 struct ReflectActionRequest {
+    request_id: Option<String>,
     checkpoint_id: String,
     question_id: String,
     answer: String,
@@ -418,6 +424,7 @@ pub struct WebRuntime {
     state: Mutex<PersistedState>,
     agent: Option<CommandAnalyzer>,
     studio: StudioRuntime,
+    active_actions: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 
 impl WebRuntime {
@@ -448,6 +455,7 @@ impl WebRuntime {
             state: Mutex::new(state),
             agent,
             studio,
+            active_actions: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -1065,12 +1073,17 @@ impl WebRuntime {
             "source_ref": request.source_ref,
             "answer_policy": {"must_cite": true, "use_only_read_range": request.spoiler_mode == SpoilerMode::ReadRange},
         });
-        let cards =
-            if let Some(cards) = self.run_agent("explain_passage", input, &context, &boundary)? {
-                cards
-            } else {
-                vec![self.fallback_explanation(&request, &context, &boundary)]
-            };
+        let cards = if let Some(cards) = self.run_agent(
+            "explain_passage",
+            input,
+            &context,
+            &boundary,
+            request.request_id.as_deref(),
+        )? {
+            cards
+        } else {
+            vec![self.fallback_explanation(&request, &context, &boundary)]
+        };
         self.validate_cards(&cards, &boundary)?;
         Ok(RuntimeCardResponse {
             cards,
@@ -1088,7 +1101,13 @@ impl WebRuntime {
             "question": request.question,
             "answer_policy": {"must_cite": true, "use_only_read_range": request.spoiler_mode == SpoilerMode::ReadRange},
         });
-        let cards = if let Some(cards) = self.run_agent("ask_book", input, &context, &boundary)? {
+        let cards = if let Some(cards) = self.run_agent(
+            "ask_book",
+            input,
+            &context,
+            &boundary,
+            request.request_id.as_deref(),
+        )? {
             cards
         } else {
             vec![self.fallback_answer(&request.question, &context, &boundary)]
@@ -1230,12 +1249,17 @@ impl WebRuntime {
             "expected_points": question.expected_points,
             "answer": request.answer,
         });
-        let cards =
-            if let Some(cards) = self.run_agent("reflect_on_answer", input, &context, &boundary)? {
-                cards
-            } else {
-                vec![self.fallback_reflection(&request, checkpoint, question)]
-            };
+        let cards = if let Some(cards) = self.run_agent(
+            "reflect_on_answer",
+            input,
+            &context,
+            &boundary,
+            request.request_id.as_deref(),
+        )? {
+            cards
+        } else {
+            vec![self.fallback_reflection(&request, checkpoint, question)]
+        };
         self.validate_cards(&cards, &boundary)?;
         if let Some(session_id) = &request.reader_state.session_id {
             let card = cards
@@ -1278,6 +1302,7 @@ impl WebRuntime {
         input: Value,
         context: &AssembledContext,
         boundary: &SpoilerBoundary,
+        request_id: Option<&str>,
     ) -> Result<Option<Vec<RuntimeCard>>, RuntimeError> {
         let Some(agent) = &self.agent else {
             return Ok(None);
@@ -1291,10 +1316,81 @@ impl WebRuntime {
             spoiler_boundary: boundary.clone(),
             output_schema: runtime_card_schema(task),
         };
-        let response: AgentResponse = agent
-            .execute(&request)
-            .map_err(|error| RuntimeError::bad_gateway(error.to_string()))?;
-        self.validate_cards(&response.cards, boundary)?;
+        let request_id = request_id
+            .map(str::to_owned)
+            .unwrap_or_else(crate::execution::id);
+        if request_id.is_empty()
+            || request_id.len() > 80
+            || !request_id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return Err(RuntimeError::bad_request("invalid request_id"));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut active = self
+                .active_actions
+                .lock()
+                .map_err(|_| RuntimeError::internal("action lock poisoned"))?;
+            if active.contains_key(&request_id) {
+                return Err(RuntimeError {
+                    status: 409,
+                    code: "duplicate_request",
+                    message: "request_id is already active".into(),
+                });
+            }
+            active.insert(request_id.clone(), cancel.clone());
+        }
+        let mut request =
+            serde_json::to_value(request).map_err(|_| RuntimeError::internal("invalid request"))?;
+        request["analysis_version"] = self
+            .book
+            .manifest
+            .get("analysis_key")
+            .cloned()
+            .unwrap_or_else(|| json!(self.book.source_hash));
+        let diagnostics = self.state_dir.join("diagnostics");
+        let result = agent.execute_action(&request, &cancel, &request_id, &diagnostics);
+        self.active_actions
+            .lock()
+            .map_err(|_| RuntimeError::internal("action lock poisoned"))?
+            .remove(&request_id);
+        let value = result.map_err(|code| RuntimeError {
+            status: match code.as_str() {
+                "busy" => 503,
+                "timeout" => 504,
+                "cancelled" => 409,
+                "context_too_large" => 413,
+                _ => 502,
+            },
+            code: match code.as_str() {
+                "busy" => "busy",
+                "timeout" => "timeout",
+                "cancelled" => "cancelled",
+                "context_too_large" => "context_too_large",
+                _ => "invalid_agent_response",
+            },
+            message: code,
+        })?;
+        let validation = serde_json::from_value::<AgentResponse>(value)
+            .map_err(|_| RuntimeError::bad_gateway("invalid agent response"))
+            .and_then(|response| {
+                self.validate_cards(&response.cards, boundary)?;
+                Ok(response)
+            });
+        let path = diagnostics.join(format!("{request_id}.json"));
+        let mut event: Value = read_json(&path).map_err(RuntimeError::internal)?;
+        event["validation"] = json!(if validation.is_ok() {
+            "cards_and_references_passed"
+        } else {
+            "cards_or_references_failed"
+        });
+        if validation.is_err() {
+            event["status"] = json!("invalid_output");
+        }
+        book_analysis::write_atomic_json(&path, &event).map_err(RuntimeError::internal)?;
+        let response = validation?;
         Ok(Some(response.cards))
     }
 
@@ -1942,6 +2038,16 @@ impl WebRuntime {
         let (path, query) = target
             .split_once('?')
             .map_or((target, ""), |(path, query)| (path, query));
+        if method == "GET" && path == "/health/live" {
+            return HttpResponse::json(200, json!({"status":"live"}));
+        }
+        if method == "GET" && path == "/health/ready" {
+            let ready = self.agent.as_ref().is_none_or(CommandAnalyzer::available);
+            return HttpResponse::json(
+                if ready { 200 } else { 503 },
+                json!({"status":if ready{"ready"}else{"analyzer_unavailable"},"mode":if self.agent.is_some(){"model"}else{"offline"}}),
+            );
+        }
         if method == "GET" && path == "/studio" {
             return Ok(HttpResponse::studio_html());
         }
@@ -2011,6 +2117,17 @@ impl WebRuntime {
         body: &[u8],
     ) -> Result<HttpResponse, RuntimeError> {
         match segments {
+            ["actions", id, "cancel"] if method == "POST" => {
+                let active = self
+                    .active_actions
+                    .lock()
+                    .map_err(|_| RuntimeError::internal("action lock poisoned"))?;
+                let cancel = active
+                    .get(*id)
+                    .ok_or_else(|| RuntimeError::not_found("action is not running"))?;
+                cancel.store(true, Ordering::SeqCst);
+                HttpResponse::json(202, json!({"request_id":id,"state":"cancelling"}))
+            }
             ["status"] if method == "GET" => HttpResponse::json(
                 200,
                 json!({
@@ -2160,6 +2277,12 @@ fn serve_surface(
     agent_command: Option<PathBuf>,
     home: &str,
 ) -> Result<(), String> {
+    let address: std::net::SocketAddr = bind
+        .parse()
+        .map_err(|_| "local reader requires a loopback IP address")?;
+    if !address.ip().is_loopback() {
+        return Err("unauthenticated reader must bind to loopback".into());
+    }
     let runtime = Arc::new(WebRuntime::load(package_dir, state_dir, agent_command)?);
     serve_http(
         bind,
@@ -2174,12 +2297,34 @@ pub(crate) fn serve_http(bind: &str, home: &str, handler: Arc<HttpHandler>) -> R
     let listener =
         TcpListener::bind(bind).map_err(|error| format!("cannot bind {bind}: {error}"))?;
     eprintln!("Codexia: http://{bind}{home}");
+    let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                if let Err(error) = handle_connection(handler.as_ref(), stream) {
-                    eprintln!("request error: {error}");
+            Ok(mut stream) => {
+                if active
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                        (v < 32).then_some(v + 1)
+                    })
+                    .is_err()
+                {
+                    let _ = write_http_response(
+                        &mut stream,
+                        HttpResponse::error(RuntimeError {
+                            status: 503,
+                            code: "busy",
+                            message: "connection limit reached".into(),
+                        }),
+                    );
+                    continue;
                 }
+                let handler = handler.clone();
+                let active = active.clone();
+                std::thread::spawn(move || {
+                    if handle_connection(handler.as_ref(), stream).is_err() {
+                        eprintln!("HTTP connection failed");
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             Err(error) => eprintln!("connection error: {error}"),
         }
@@ -2191,8 +2336,25 @@ fn handle_connection(handler: &HttpHandler, mut stream: TcpStream) -> Result<(),
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|error| error.to_string())?;
-    let request = read_http_request(&mut stream)?;
-    let response = handler(&request);
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| error.to_string())?;
+    let response = match read_http_request(&mut stream) {
+        Ok(request) => handler(&request),
+        Err(error) => HttpResponse::error(RuntimeError {
+            status: if error.contains("too large") {
+                413
+            } else {
+                400
+            },
+            code: if error.contains("too large") {
+                "request_too_large"
+            } else {
+                "bad_request"
+            },
+            message: error,
+        }),
+    };
     write_http_response(&mut stream, response)
 }
 
@@ -2212,7 +2374,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
             return Err("connection closed before request headers".to_owned());
         }
         bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() > MAX_REQUEST_BYTES {
+        if bytes.len() > 16384 {
             return Err("request is too large".to_owned());
         }
         if let Some(position) = find_bytes(&bytes, b"\r\n\r\n") {
@@ -2238,6 +2400,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
         .collect::<BTreeMap<_, _>>();
+    if headers.contains_key("transfer-encoding") {
+        return Err("unsupported transfer encoding".into());
+    }
     let content_length = headers
         .get("content-length")
         .map(|value| value.parse::<usize>())

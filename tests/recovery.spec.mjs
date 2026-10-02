@@ -49,7 +49,7 @@ const out=spawnSync(${JSON.stringify(resolve('tests/fixtures/analyzer.mjs'))},[]
     const broken=(await api('/v1/books','POST',readFileSync('private/golden-books/source/the-souls-of-black-folk-pg408.epub'))).body;await wait(broken.book_id,'failed');
     const dir=join(root,'books',broken.book_id,'package');
     expect(readdirSync(join(dir,'chapters')).filter(name=>name.endsWith('.analysis.json')).length).toBeGreaterThan(0);
-    const failedStatus=JSON.parse(readFileSync(join(dir,'compile_status.json'),'utf8'));expect(failedStatus.complete).toBe(false);expect(failedStatus.error).toContain('intentional');expect(failedStatus.completed_artifacts.length).toBeGreaterThan(0);
+    const failedStatus=JSON.parse(readFileSync(join(dir,'compile_status.json'),'utf8'));expect(failedStatus.complete).toBe(false);expect(failedStatus.error).toContain('analyzer_failed');expect(failedStatus.completed_artifacts.length).toBeGreaterThan(0);
     await stop();await start();
     expect((await api(`/v1/books/${good.book_id}/status`)).body.state).toBe('ready');expect((await api(`/v1/books/${broken.book_id}/status`)).body.state).toBe('failed');
     expect((await api(`/v1/books/${broken.book_id}/package`)).status).toBe(404);

@@ -113,6 +113,14 @@ fn cmd_api(args: &[String]) -> Result<(), String> {
     }
     let library_dir = library_dir.ok_or_else(|| "api requires a library directory".to_owned())?;
     let api_key_file = api_key_file.ok_or_else(|| "api requires --api-key-file".to_owned())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(&api_key_file).map_err(|error| error.to_string())?;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("API key file must be owner-only (chmod 600)".to_owned());
+        }
+    }
     let api_key = fs::read_to_string(&api_key_file)
         .map_err(|error| format!("cannot read API key file {api_key_file}: {error}"))?
         .trim()
@@ -457,7 +465,9 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     book_analysis::write_compile_status(&out, &status)?;
 
     let result = (|| -> Result<(), String> {
-        let analyzer = CommandChapterAnalyzer::new(command);
+        let analyzer = CommandChapterAnalyzer::new(command)
+            .with_diagnostics(out.join("diagnostics"))
+            .with_identity(status.analysis_key.clone());
         let analyses = chapter_analysis::analyze_book_to_dir(
             &book_ir,
             &analyzer,

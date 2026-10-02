@@ -96,17 +96,7 @@ pub fn parse_epub_with_options(
             open_options,
         ) {
             Ok(chapter) => chapters.push(chapter),
-            Err(error) => {
-                eprintln!(
-                    "warning: spine item {spine_index} ({}) failed to parse: {error}",
-                    spine_item.idref,
-                );
-                chapters.push(empty_chapter(
-                    spine_index,
-                    &spine_item.idref,
-                    &spine_item.idref,
-                ));
-            }
+            Err(error) => return Err(format!("spine item {spine_index} failed to parse: {error}")),
         }
     }
 

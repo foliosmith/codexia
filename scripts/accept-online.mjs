@@ -45,7 +45,7 @@ try {
     report.runs.push(run);
     save();
     const args = ["compile", resolve(book.file.path), "--profile", profile, "--out", packageDir, "--analyzer-command", analyzer, "--analysis-jobs", "2"];
-    const env = { ...process.env, CODEXIA_ONLINE_RUN_DIR: runDir };
+    const env = { ...process.env, CODEXIA_CAPTURE_CONTENT: "1", CODEXIA_ONLINE_RUN_DIR: runDir };
     console.log(`Compiling ${book.id} (${profile})`);
     const started = performance.now();
     const result = await compile(args, env, packageDir, run.states);

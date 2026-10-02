@@ -95,3 +95,32 @@ renames, the next compiler run restores a missing destination from that backup.
 A leftover backup alongside a destination is reported for explicit recovery,
 rather than silently deleted. Do not store unrelated files in these reserved
 compiler paths. Automatic incremental range extension remains separate work.
+
+## Local trial operation and limits
+
+The trial entry is `codexia serve <package> --state-dir <state> --bind 127.0.0.1:8787 --agent-command <adapter>`.
+It is a single-user, local process. Unauthenticated Reader/Studio listeners reject non-loopback addresses. Keep the package, state and provider run directory owner-only (`chmod 700`); API key files must be owner-only (`chmod 600`) and contain at least 16 nonblank characters. Remote access requires a separately configured authenticated TLS reverse proxy; it is outside this trial.
+
+`GET /health/live` reports the listener; `/health/ready` reports adapter executable availability and whether the Reader is in model or offline mode. Readiness does not probe provider credentials or make a paid request. Stop local CLI compilation with the terminal's interrupt (process group); completed chapter files remain available for retry. The authenticated API also accepts `POST /v1/books/{id}/cancel`, marks an interrupted compile failed, and supports the existing retry endpoint.
+
+Defaults are 8 MiB per HTTP body, 16 KiB headers, 32 simultaneous connections, four analyzer calls per process and one API compilation. A request over the body limit returns JSON `413 request_too_large`. EPUB container, decompression, XML and document limits are enforced by pagelet; a failed spine parse aborts compilation rather than publishing omitted content. Larger books must be compiled through the CLI, which still applies decompression and model-context limits.
+
+Positive integer environment overrides:
+
+| Variable | Default | Behavior at limit |
+| --- | --- | --- |
+| `CODEXIA_MAX_CONTEXT_BYTES` | 524288 | Reject serialized analyzer input before spawning; Reader HTTP 413 |
+| `CODEXIA_MAX_OUTPUT_BYTES` | 4194304 | Reject oversized analyzer stdout; stderr capped at 65536 bytes |
+| `CODEXIA_READER_TIMEOUT_MS` | 120000 | Terminate owned process tree, HTTP 504 |
+| `CODEXIA_ANALYZER_TIMEOUT_MS` | 1200000 | Fail the current compiler stage; keep validated chapters |
+| `CODEXIA_MAX_ANALYZERS` | 4 | Reject additional work, Reader HTTP 503 |
+| `CODEXIA_MAX_COMPILES` | 1 | API rejects additional compilations with HTTP 503 |
+| `CODEXIA_COMPILE_TIMEOUT_MS` | 3600000 | Terminate compiler and descendants, retain failed/retryable job |
+
+Reader actions accept an optional unique `request_id` (1–80 ASCII letters, digits, hyphens or underscores). The Reader displays a cancel button; `POST /v1/books/{id}/actions/{request_id}/cancel` requests termination and the original call returns 409. This differs from closing a tab, which does not cancel server work. Unix termination uses native `pgrep`/`kill`, Windows uses `taskkill /T`; adapters must not daemonize or detach descendants.
+
+Diagnostics are under `<state>/diagnostics` and `<package>/diagnostics`: action ID, task, analysis identity, allowed ranges, retrieved block IDs, bytes, elapsed time, validation status and usage. They exclude questions, source prose, answers, credentials and provider stderr. Adapters can write `{input_tokens,output_tokens}` to the supplied `CODEXIA_USAGE_FILE`. Unknown usage and cost remain `null`; explicit `CODEXIA_INPUT_USD_PER_MILLION` and `CODEXIA_OUTPUT_USD_PER_MILLION` yield a simple uncached-token estimate, not invoice reconciliation. Completed chapter artifacts and compile status identify retries/reuse; a reused chapter produces no new model-call event.
+
+The online adapter retains redacted provider events by default and removes temporary schema/output files. Only acceptance runs explicitly set `CODEXIA_CAPTURE_CONTENT=1`; those artifacts can contain book or reader content and must be owner-only and deleted after review (trial policy: within seven days). Do not enable captures for participant sessions. Native provider tools may have their own logging policies.
+
+Back up the package and state directories together while the server is stopped. Restore both to a new owner-only directory, run `codexia validate <package>`, then start the Reader with the restored state. Failed upgrade candidates do not replace the active package. A backup restore rehearsal and multi-hour soak remain separate production gates.

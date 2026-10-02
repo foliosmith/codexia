@@ -8,6 +8,7 @@
 pub mod book_analysis;
 pub mod chapter_analysis;
 pub mod epub_parser;
+mod execution;
 pub mod ir;
 pub mod normalizer;
 pub mod pipeline;

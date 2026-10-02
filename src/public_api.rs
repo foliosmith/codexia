@@ -4,8 +4,11 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex, MutexGuard},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -32,7 +35,7 @@ pub struct PublicApiConfig {
 
 impl PublicApiConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.api_key.len() < 16 {
+        if self.api_key.trim().len() < 16 {
             return Err("API key must contain at least 16 characters".to_owned());
         }
         if self.rate_limit_per_minute == 0 {
@@ -135,6 +138,7 @@ pub struct PublicApi {
     jobs: Mutex<BTreeMap<String, BookJob>>,
     rate_window: Mutex<VecDeque<Instant>>,
     usage: Mutex<UsageState>,
+    cancellations: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
 }
 
 impl PublicApi {
@@ -158,6 +162,7 @@ impl PublicApi {
             jobs: Mutex::new(BTreeMap::new()),
             rate_window: Mutex::new(VecDeque::new()),
             usage: Mutex::new(usage),
+            cancellations: Mutex::new(BTreeMap::new()),
         };
         api.load_existing_books()?;
         Ok(api)
@@ -284,6 +289,18 @@ impl PublicApi {
                         json!({"book_id":id,"status_href":format!("/v1/books/{id}/status")}),
                     );
                 }
+                if jobs
+                    .values()
+                    .filter(|j| matches!(j.state, JobState::Queued | JobState::Processing))
+                    .count()
+                    >= crate::execution::limit("CODEXIA_MAX_COMPILES", 1)
+                {
+                    return error_response(503, "busy", "compile limit reached", true);
+                }
+                self.cancellations
+                    .lock()
+                    .expect("cancellation lock")
+                    .insert(id.clone(), Arc::new(AtomicBool::new(false)));
                 if let Err(error) = self.persist_job(&job) {
                     return error_response(500, "storage_error", error, true);
                 }
@@ -521,6 +538,18 @@ impl PublicApi {
             .split('/')
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
+        if let ["v1", "books", book_id, "cancel"] = segments.as_slice() {
+            if request.method == "POST" {
+                let cancellations = self.cancellations.lock().expect("cancellation lock");
+                return cancellations.get(*book_id).map_or_else(
+                    || error_response(409, "not_running", "compile is not running", false),
+                    |flag| {
+                        flag.store(true, Ordering::SeqCst);
+                        json_response(202, json!({"state":"cancelling"}))
+                    },
+                );
+            }
+        }
         if let ["v1", "books", book_id, "retry"] = segments.as_slice() {
             if request.method == "POST" {
                 return self.retry(book_id);
@@ -663,29 +692,73 @@ impl PublicApi {
         if let Some(analyzer) = &self.config.analyzer_command {
             command.arg("--analyzer-command").arg(analyzer);
         }
-        let result = command.output();
+        let cancel = self
+            .cancellations
+            .lock()
+            .expect("cancellation lock")
+            .get(&book_id)
+            .cloned()
+            .expect("queued cancellation");
+        let result = (|| -> Result<std::process::ExitStatus, String> {
+            let mut child = command
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| "compiler_unavailable".to_owned())?;
+            let start = Instant::now();
+            loop {
+                let reason = if cancel.load(Ordering::SeqCst) {
+                    Some("cancelled")
+                } else if start.elapsed()
+                    > Duration::from_millis(crate::execution::limit(
+                        "CODEXIA_COMPILE_TIMEOUT_MS",
+                        3600000,
+                    ) as u64)
+                {
+                    Some("timeout")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    crate::execution::terminate(&mut child);
+                    return Err(reason.to_owned());
+                }
+                if let Some(status) = child.try_wait().map_err(|_| "compiler_failed".to_owned())? {
+                    return Ok(status);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        })();
+        self.cancellations
+            .lock()
+            .expect("cancellation lock")
+            .remove(&book_id);
         match result {
-            Ok(output) if output.status.success() => match read_compile_status(&package_dir)
-                .and_then(|status| {
+            Ok(status) if status.success() => {
+                match read_compile_status(&package_dir).and_then(|status| {
                     if status.analysis_key != expected_key {
                         return Err("analyzer identity changed during compilation".to_owned());
                     }
                     self.register_package(&package_dir)
                 }) {
-                Ok(_) => {
-                    self.update_job(&book_id, JobState::Ready, 10_000, None, None);
-                    self.record_compile_cost();
-                    self.notify(
-                        "book.processing.completed",
-                        &book_id,
-                        json!({"state":"ready"}),
-                    );
+                    Ok(_) => {
+                        self.update_job(&book_id, JobState::Ready, 10_000, None, None);
+                        self.record_compile_cost();
+                        self.notify(
+                            "book.processing.completed",
+                            &book_id,
+                            json!({"state":"ready"}),
+                        );
+                    }
+                    Err(error) => self.fail_job(&book_id, error),
                 }
-                Err(error) => self.fail_job(&book_id, error),
-            },
-            Ok(output) => self.fail_job(
+            }
+            Ok(_) => self.fail_job(
                 &book_id,
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                read_compile_status(&package_dir)
+                    .ok()
+                    .and_then(|s| s.error)
+                    .unwrap_or_else(|| "compiler_failed".to_owned()),
             ),
             Err(error) => self.fail_job(&book_id, error.to_string()),
         }
@@ -727,13 +800,14 @@ impl PublicApi {
     }
 
     fn delegate_to_book(&self, book_id: &str, request: &HttpRequest) -> HttpResponse {
-        match self.lock_books() {
-            Ok(books) => books.get(book_id).map_or_else(
-                || error_response(404, "not_found", "book is not ready", true),
-                |runtime| runtime.dispatch(&request.method, &request.target, &request.body),
-            ),
-            Err(error) => error_response(error.status, error.code, error.message, true),
-        }
+        let runtime = match self.lock_books() {
+            Ok(books) => books.get(book_id).cloned(),
+            Err(error) => return error_response(error.status, error.code, error.message, true),
+        };
+        runtime.map_or_else(
+            || error_response(404, "not_found", "book is not ready", true),
+            |runtime| runtime.dispatch(&request.method, &request.target, &request.body),
+        )
     }
 
     fn delegate_resource(&self, kind: &str, id: &str, request: &HttpRequest) -> HttpResponse {
@@ -753,11 +827,12 @@ impl PublicApi {
                             false,
                         );
                     }
-                    owner = Some(runtime);
+                    owner = Some(runtime.clone());
                 }
                 Err(error) => return error_response(500, "internal_error", error, true),
             }
         }
+        drop(books);
         owner.map_or_else(
             || error_response(404, "not_found", "resource not found", false),
             |runtime| runtime.dispatch(&request.method, &request.target, &request.body),

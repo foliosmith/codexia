@@ -160,6 +160,13 @@
       if (!response.ok) throw new Error(payload.error?.message || `HTTP ${response.status}`);
       return payload;
     };
+    const modelAction = async (suffix, value) => {
+      const request_id = crypto.randomUUID();
+      const cancel = document.createElement('button'); cancel.className='secondary-button'; cancel.textContent='取消生成';
+      cancel.addEventListener('click', async () => { cancel.disabled=true; try { await api(bookPath(`/actions/${request_id}/cancel`),jsonOptions('POST',{})); } catch(error) { cancel.textContent=error.message; } });
+      document.body.append(cancel); cancel.style.cssText='position:fixed;bottom:20px;right:20px;z-index:100';
+      try { return await api(bookPath(suffix),jsonOptions('POST',{...value,request_id})); } finally {cancel.remove();}
+    };
     const jsonOptions = (method, value) => ({method, body: JSON.stringify(value)});
     const bookPath = suffix => `/v1/books/${state.bootstrap.book.book_id}${suffix}`;
     const currentChapterId = () => state.chapter?.chapter_id || state.session?.current_location?.chapter_id || state.bootstrap.chapters[0]?.chapter_id;
@@ -356,13 +363,13 @@
     }
     async function explainSelection(intent) {
       try {
-        const response = await api(bookPath('/explain'), jsonOptions('POST', {selected_text:state.selection.text, source_ref:{block_id:state.selection.block_id,start_char:state.selection.start_char,end_char:state.selection.end_char,text_fingerprint:state.selection.text_fingerprint}, reader_state:readerState(), spoiler_mode:state.session.spoiler_mode, intent}));
+        const response = await modelAction('/explain', {selected_text:state.selection.text, source_ref:{block_id:state.selection.block_id,start_char:state.selection.start_char,end_char:state.selection.end_char,text_fingerprint:state.selection.text_fingerprint}, reader_state:readerState(), spoiler_mode:state.session.spoiler_mode, intent});
         state.cards = response.cards; state.tab = 'context'; refreshAgentPanel();
       } catch (error) { showAgentError(error); }
     }
     async function askBook(event) {
       event.preventDefault(); const input = document.querySelector('#chat-input'); if (!input.value.trim()) return;
-      try { const response = await api(bookPath('/ask'), jsonOptions('POST', {question:input.value, reader_state:readerState(), spoiler_mode:state.session.spoiler_mode})); state.cards = response.cards; refreshAgentPanel(); }
+      try { const response = await modelAction('/ask', {question:input.value, reader_state:readerState(), spoiler_mode:state.session.spoiler_mode}); state.cards = response.cards; refreshAgentPanel(); }
       catch (error) { showAgentError(error); }
     }
     async function saveHighlight() {
@@ -389,7 +396,7 @@
     }
     async function submitReflection(event) {
       const button = event.currentTarget; const answer = document.querySelector(`[data-answer="${CSS.escape(button.dataset.reflect)}"]`).value;
-      try { const response = await api(bookPath(`/chapters/${state.chapter.chapter_id}/reflect`), jsonOptions('POST', {checkpoint_id:button.dataset.checkpoint,question_id:button.dataset.reflect,answer,reader_state:readerState()})); document.querySelector('#reflection-result').innerHTML = cardHtml(response.cards[0]); }
+      try { const response = await modelAction(`/chapters/${state.chapter.chapter_id}/reflect`, {checkpoint_id:button.dataset.checkpoint,question_id:button.dataset.reflect,answer,reader_state:readerState()}); document.querySelector('#reflection-result').innerHTML = cardHtml(response.cards[0]); }
       catch (error) { document.querySelector('#reflection-result').innerHTML = `<p class="error">${esc(error.message)}</p>`; }
     }
 

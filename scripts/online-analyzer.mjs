@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,8 +20,9 @@ const promptVersion = process.env.CODEXIA_ANALYZER_PROMPT_VERSION || (request.ta
 const timeoutMs = Number(process.env.CODEXIA_ANALYZER_TIMEOUT_MS || (request.analysis_profile === "deep" ? 1_200_000 : 900_000));
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error("CODEXIA_ANALYZER_TIMEOUT_MS must be a positive integer");
 const eventId = `${Date.now()}-${process.pid}-${randomUUID()}`;
+const captureContent = process.env.CODEXIA_CAPTURE_CONTENT === "1";
 const workDir = join(runDir, "provider", eventId);
-mkdirSync(workDir, { recursive: true });
+mkdirSync(workDir, { recursive: true, mode: 0o700 });
 
 const schema = toSchema(request.output_schema);
 const fingerprints = new Set();
@@ -148,7 +149,7 @@ const event = {
   output_bytes: 0,
   tokens_used: tokenMatch ? Number(tokenMatch[1].replaceAll(",", "")) : null,
   usage,
-  provider_errors: providerErrors,
+  provider_error_count: providerErrors.length,
   transport_fallback_to_http: stderr.includes("Falling back from WebSockets to HTTPS"),
   transport_retry_count: [...stderr.matchAll(/responses_retry/g)].length,
   status: result.status === 0 ? "completed" : result.error?.code === "ETIMEDOUT" ? "timeout" : "failed",
@@ -173,10 +174,13 @@ try {
   writeFileSync(join(workDir, "event.json"), `${JSON.stringify(event, null, 2)}\n`);
   process.stdout.write(JSON.stringify(value));
 } catch (error) {
-  event.error = String(error);
-  event.stderr_tail = stderr.slice(-4000);
+  if (captureContent) { event.error = String(error); event.stderr_tail = stderr.slice(-4000); }
   writeFileSync(join(workDir, "event.json"), `${JSON.stringify(event, null, 2)}\n`);
-  throw error;
+  process.stderr.write(`analyzer ${event.status}\n`);
+  process.exitCode = 1;
+} finally {
+  if (process.env.CODEXIA_USAGE_FILE && usage) writeFileSync(process.env.CODEXIA_USAGE_FILE, JSON.stringify(usage));
+  if (!captureContent) { rmSync(schemaPath, {force:true}); rmSync(outputPath, {force:true}); }
 }
 
 function validateChapterReferences(value, request) {

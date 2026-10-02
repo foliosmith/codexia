@@ -49,7 +49,7 @@ process.stdout.write(result.stdout);process.stderr.write(result.stderr);process.
     const result = spawnSync(binary, ["compile", epub, "--out", packageDir, "--analyzer-command", command, "--analysis-jobs", "1", "--analyze-through", "3"], { encoding: "utf8", timeout: 10_000 });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(mode === "invalid-json" ? "invalid JSON" : mode === "partial-failure" ? "intentional chapter failure" : "ETIMEDOUT");
+    expect(result.stderr).toContain(mode === "invalid-json" ? "invalid_output" : "analyzer_failed");
     const status = JSON.parse(readFileSync(join(packageDir, "compile_status.json"), "utf8"));
     expect(status.complete).toBe(false);
     expect(status.ready_stages).toEqual(["parse", "normalize"]);

@@ -7,9 +7,7 @@
 
 use std::{
     fmt, fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -259,6 +257,8 @@ pub trait ChapterAnalyzer: Sync {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CommandAnalyzer {
     executable: PathBuf,
+    diagnostics: Option<PathBuf>,
+    analysis_identity: Option<String>,
 }
 
 /// Backwards-compatible name for the chapter-analysis adapter.
@@ -269,51 +269,70 @@ impl CommandAnalyzer {
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
+            diagnostics: None,
+            analysis_identity: None,
         }
+    }
+
+    pub(crate) fn available(&self) -> bool {
+        let Ok(metadata) = fs::metadata(&self.executable) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.is_file()
+        }
+    }
+
+    pub fn with_identity(mut self, identity: String) -> Self {
+        self.analysis_identity = Some(identity);
+        self
+    }
+
+    pub fn with_diagnostics(mut self, directory: PathBuf) -> Self {
+        self.diagnostics = Some(directory);
+        self
+    }
+
+    pub(crate) fn execute_action(
+        &self,
+        request: &serde_json::Value,
+        cancel: &std::sync::atomic::AtomicBool,
+        request_id: &str,
+        diagnostics: &Path,
+    ) -> Result<serde_json::Value, String> {
+        crate::execution::run(
+            &self.executable,
+            request,
+            cancel,
+            request_id,
+            Some(diagnostics),
+        )
     }
 
     pub(crate) fn execute<Request: Serialize, Response: DeserializeOwned>(
         &self,
         request: &Request,
     ) -> Result<Response, AnalysisError> {
-        let mut child = Command::new(&self.executable)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                AnalysisError::new(format!(
-                    "cannot start analyzer command {}: {error}",
-                    self.executable.display()
-                ))
-            })?;
-
-        let request_json = serde_json::to_vec(request)
-            .map_err(|error| AnalysisError::new(format!("cannot serialize request: {error}")))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| AnalysisError::new("analyzer command stdin is unavailable"))?
-            .write_all(&request_json)
-            .map_err(|error| {
-                AnalysisError::new(format!("cannot send analyzer request: {error}"))
-            })?;
-
-        let output = child
-            .wait_with_output()
-            .map_err(|error| AnalysisError::new(format!("analyzer command failed: {error}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AnalysisError::new(format!(
-                "analyzer command exited with {}: {}",
-                output.status,
-                stderr.trim()
-            )));
+        let mut request =
+            serde_json::to_value(request).map_err(|_| AnalysisError::new("invalid_request"))?;
+        if let Some(identity) = &self.analysis_identity {
+            request["analysis_version"] = serde_json::json!(identity);
         }
-
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            AnalysisError::new(format!("analyzer command returned invalid JSON: {error}"))
-        })
+        let result = crate::execution::run(
+            &self.executable,
+            &request,
+            &std::sync::atomic::AtomicBool::new(false),
+            &crate::execution::id(),
+            self.diagnostics.as_deref(),
+        )
+        .map_err(AnalysisError::new)?;
+        serde_json::from_value(result).map_err(|_| AnalysisError::new("invalid_output"))
     }
 }
 
