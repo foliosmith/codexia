@@ -866,6 +866,7 @@ mod tests {
             fixture_block(1, "second", "Second chapter text."),
         ];
         BookIr {
+            logical_sections: Vec::new(),
             metadata: Metadata {
                 title: Some(Arc::from("Fixture Book")),
                 identifier: Some(Arc::from("fixture")),

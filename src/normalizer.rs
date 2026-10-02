@@ -53,6 +53,7 @@ pub fn normalise(
         BTreeSet::new()
     };
 
+    let mut anchor_blocks = BTreeMap::new();
     let mut ir_chapters = Vec::new();
     let mut ir_blocks = Vec::new();
 
@@ -153,18 +154,42 @@ pub fn normalise(
             is_noise,
         });
 
+        fn contains(chapter: &PageletChapterIr, root: NodeId, target: NodeId) -> bool {
+            root == target
+                || chapter.nodes.get(root).is_some_and(|node| {
+                    node.children()
+                        .iter()
+                        .any(|child| contains(chapter, *child, target))
+                })
+        }
+        for anchor in chapter.anchors.anchors.values() {
+            if anchor.utf8_byte_offset != 0 {
+                continue;
+            }
+            if let Some(draft) = normalised_blocks.iter().find(|draft| {
+                draft
+                    .node_ids
+                    .first()
+                    .is_some_and(|id| contains(chapter, anchor.node_id, *id))
+            }) {
+                anchor_blocks.insert(anchor.key.to_string(), draft.block.block_id.clone());
+            }
+        }
         for draft in normalised_blocks {
             ir_blocks.push(draft.block);
         }
     }
 
-    BookIr {
+    let mut book = BookIr {
+        logical_sections: Vec::new(),
         metadata: metadata.clone(),
         toc: normalise_toc(toc),
         spine: spine.to_vec(),
         chapters: ir_chapters,
         blocks: ir_blocks,
-    }
+    };
+    book.logical_sections = crate::sections::build(&book, &anchor_blocks);
+    book
 }
 
 #[derive(Debug, Clone)]
@@ -361,7 +386,11 @@ pub fn compile(book_ir: &BookIr, profile: Profile, source_hash: &str) -> Compile
     };
 
     let manifest = Manifest {
-        format_version: Arc::from("0.1"),
+        format_version: Arc::from(if book_ir.logical_sections.is_empty() {
+            "0.1"
+        } else {
+            "0.2"
+        }),
         profile: Arc::from(profile_name(profile)),
         source_hash: source_hash.to_owned(),
         created_at: chrono_now(),

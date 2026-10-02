@@ -441,6 +441,7 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
         return Ok(());
     };
 
+    let book_ir = codexia::sections::analysis_view(&book_ir);
     let total_analyzable_chapter_count = book_ir
         .chapters
         .iter()
@@ -677,6 +678,34 @@ fn validate_package(dir: &Path) -> Result<PackageStats, Vec<String>> {
     };
 
     validate_package_values(&manifest, &structure, &book_ir, &blocks, &mut errors);
+    let sections: Result<Vec<codexia::sections::LogicalSection>, _> = serde_json::from_value(
+        book_ir
+            .get("logical_sections")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    );
+    match sections {
+        Ok(sections) => {
+            let version = manifest.get("format_version").and_then(Value::as_str);
+            if (version == Some("0.2")) == sections.is_empty() {
+                errors.push("package format does not match logical sections".into());
+            }
+            let physical = blocks
+                .iter()
+                .filter_map(|b| {
+                    Some((
+                        b.get("block_id")?.as_str()?.to_owned(),
+                        b.get("chapter_index")?.as_u64()? as u32,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if let Err(error) = codexia::sections::block_sections(&sections, &physical) {
+                errors.push(error);
+            }
+        }
+        Err(error) => errors.push(error.to_string()),
+    }
+
     validate_enriched_package(dir, &manifest, &blocks, &mut errors);
     if errors.is_empty() {
         Ok(PackageStats {
@@ -815,7 +844,37 @@ fn validate_enriched_package(
             errors.push("eval_report.json: book synthesis documents are unavailable".to_owned());
             return;
         };
-        let block_map = grounding_blocks_from_values(blocks, errors);
+        let mut block_map = grounding_blocks_from_values(blocks, errors);
+        if let Some(ir) = read_json_file(dir, "book_ir.json", errors) {
+            match serde_json::from_value::<Vec<codexia::sections::LogicalSection>>(
+                ir.get("logical_sections")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            ) {
+                Ok(sections) => {
+                    let physical = blocks
+                        .iter()
+                        .filter_map(|b| {
+                            Some((
+                                b.get("block_id")?.as_str()?.to_owned(),
+                                b.get("chapter_index")?.as_u64()? as u32,
+                            ))
+                        })
+                        .collect::<Vec<_>>();
+                    match codexia::sections::block_sections(&sections, &physical) {
+                        Ok(mapping) => {
+                            for (id, index) in mapping {
+                                if let Some(block) = block_map.get_mut(&id) {
+                                    block.chapter_index = index;
+                                }
+                            }
+                        }
+                        Err(error) => errors.push(error),
+                    }
+                }
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
         let expected = book_analysis::validate_grounding(
             &status.source_hash,
             &block_map,
@@ -1009,7 +1068,7 @@ fn validate_package_values(
     errors: &mut Vec<String>,
 ) {
     let format_version = required_str(manifest, "manifest.json", "format_version", errors);
-    if format_version.is_some_and(|value| value != "0.1") {
+    if format_version.is_some_and(|value| !matches!(value, "0.1" | "0.2")) {
         errors.push("manifest.json: unsupported format_version".to_owned());
     }
     let profile = required_str(manifest, "manifest.json", "profile", errors);

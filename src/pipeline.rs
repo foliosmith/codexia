@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 /// Version of the analyzer pipeline contract.
-pub const ANALYZER_PIPELINE_VERSION: &str = "0.1";
+pub const ANALYZER_PIPELINE_VERSION: &str = "0.2";
 
 /// The six ordered stages of book analysis.
 #[derive(Debug, Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]

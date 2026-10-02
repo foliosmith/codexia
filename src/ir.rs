@@ -16,6 +16,7 @@ pub struct BookIr {
     pub spine: Vec<SpineEntry>,
     pub chapters: Vec<Chapter>,
     pub blocks: Vec<Block>,
+    pub logical_sections: Vec<crate::sections::LogicalSection>,
 }
 
 /// Book-level metadata.
@@ -174,6 +175,10 @@ pub fn book_ir_to_json(ir: &BookIr) -> String {
         true,
     );
 
+    indent(&mut out, 1);
+    out.push_str("\"logical_sections\": ");
+    out.push_str(&serde_json::to_string(&ir.logical_sections).expect("serializable sections"));
+    out.push_str(",\n");
     indent(&mut out, 1);
     out.push_str("\"toc\": ");
     out.push_str(&serialize_toc(&ir.toc));
@@ -456,6 +461,7 @@ mod tests {
     #[test]
     fn empty_book_ir_serializes() {
         let ir = BookIr {
+            logical_sections: Vec::new(),
             metadata: Metadata {
                 title: Some(Arc::from("Test")),
                 identifier: None,

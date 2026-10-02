@@ -62,13 +62,15 @@ struct RuntimeBook {
     chapters: Vec<RuntimeChapter>,
     analyses: BTreeMap<String, ChapterAnalysis>,
     documents: SynthesisDocuments,
+    reading_layout: String,
 }
 
 impl RuntimeBook {
     fn load(package_dir: &Path) -> Result<Self, String> {
         let manifest: Value = read_json(package_dir.join("manifest.json"))?;
         let structure: Value = read_json(package_dir.join("structure.json"))?;
-        let book_ir: Value = read_json(package_dir.join("book_ir.json"))?;
+        let book_ir: Value =
+            crate::sections::json_analysis_view(read_json(package_dir.join("book_ir.json"))?)?;
         let source_hash = required_str(&manifest, "source_hash")?.to_owned();
         let book_id = source_hash.chars().take(16).collect::<String>();
         let title = book_ir
@@ -126,6 +128,26 @@ impl RuntimeBook {
                 blocks,
             });
         }
+        let logical = book_ir
+            .get("logical_sections")
+            .and_then(Value::as_array)
+            .filter(|s| !s.is_empty());
+        match manifest.get("format_version").and_then(Value::as_str) {
+            Some("0.1") if logical.is_none() => {}
+            Some("0.2") if logical.is_some() => {}
+            _ => return Err("unsupported package format or missing logical sections".into()),
+        }
+        let reading_layout = logical.map_or_else(
+            || "physical-v1".to_owned(),
+            |sections| {
+                format!(
+                    "sections-v1-{:?}",
+                    pagelet::core::ContentHash::from_bytes(
+                        serde_json::to_string(sections).unwrap().as_bytes()
+                    )
+                )
+            },
+        );
         let documents = book_analysis::read_synthesis_documents(package_dir)?;
         for (name, document_hash) in [
             ("book_map.json", &documents.book_map.source_hash),
@@ -147,6 +169,7 @@ impl RuntimeBook {
             chapters,
             analyses,
             documents,
+            reading_layout,
         })
     }
 
@@ -231,6 +254,8 @@ struct ExportRecord {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 struct PersistedState {
+    #[serde(default = "physical_layout")]
+    reading_layout: String,
     schema_version: String,
     next_id: u64,
     sessions: BTreeMap<String, ReaderSession>,
@@ -240,9 +265,14 @@ struct PersistedState {
     exports: BTreeMap<String, ExportRecord>,
 }
 
+fn physical_layout() -> String {
+    "physical-v1".into()
+}
+
 impl Default for PersistedState {
     fn default() -> Self {
         Self {
+            reading_layout: physical_layout(),
             schema_version: STATE_VERSION.to_owned(),
             next_id: 1,
             sessions: BTreeMap::new(),
@@ -438,7 +468,7 @@ impl WebRuntime {
         fs::create_dir_all(&state_dir)
             .map_err(|error| format!("cannot create {}: {error}", state_dir.display()))?;
         let state_path = state_dir.join("reader_state.json");
-        let state = if state_path.is_file() {
+        let mut state = if state_path.is_file() {
             let state: PersistedState = read_json(&state_path)?;
             if state.schema_version != STATE_VERSION {
                 return Err("reader_state.json: unsupported schema_version".to_owned());
@@ -447,6 +477,15 @@ impl WebRuntime {
         } else {
             PersistedState::default()
         };
+        if state.reading_layout != book.reading_layout
+            && (!state.sessions.is_empty()
+                || !state.highlights.is_empty()
+                || !state.notes.is_empty()
+                || !state.reflections.is_empty())
+        {
+            return Err("reader state uses another chapter layout; preserve it and select a new state directory for this package".into());
+        }
+        state.reading_layout = book.reading_layout.clone();
         let agent = agent_command.map(CommandAnalyzer::new);
         let studio = StudioRuntime::load(package_dir.as_ref(), &state_dir, agent.clone())?;
         Ok(Self {
@@ -551,6 +590,7 @@ impl WebRuntime {
                 "source_hash": self.book.source_hash,
                 "status": "ready",
                 "profile": self.book.manifest.get("profile"),
+                "chapter_basis": if self.book.reading_layout=="physical-v1" {"physical_spine"}else{"logical_sections"},
                 "chapter_count": self.book.chapters.iter().filter(|chapter| !chapter.is_noise).count(),
                 "concept_count": self.book.documents.concepts.concepts.len(),
                 "claim_count": self.book.documents.claims.claims.len(),

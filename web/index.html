@@ -221,7 +221,7 @@
     function renderHome() {
       const book = state.bootstrap.book;
       app.innerHTML = `<section class="page">
-        <div class="eyebrow">Book Agent · ${esc(book.status)}</div>
+        <div class="eyebrow">Book Agent · ${esc(book.status)}</div><p class="muted">${book.chapter_basis === 'logical_sections' ? '目录章节' : '按 EPUB 文件分片阅读；目录与文件一一对应或缺少可靠章节锚点。'}</p>
         <h1>${esc(book.title)}</h1>
         <p class="lead">处理完成。继续上次阅读，或先查看全书地图再选择阅读路径。</p>
         <div class="stats">

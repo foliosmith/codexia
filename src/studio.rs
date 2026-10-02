@@ -35,7 +35,8 @@ impl StudioPackage {
     fn load(package_dir: &Path) -> Result<Self, String> {
         let manifest: Value = read_json(package_dir.join("manifest.json"))?;
         let structure = read_json(package_dir.join("structure.json"))?;
-        let book_ir: Value = read_json(package_dir.join("book_ir.json"))?;
+        let book_ir: Value =
+            crate::sections::json_analysis_view(read_json(package_dir.join("book_ir.json"))?)?;
         let eval_report = read_json(package_dir.join("eval_report.json"))?;
         let source_hash = manifest
             .get("source_hash")
