@@ -66,16 +66,16 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     await expect.poll(async () => (await api(uploaded.status_href)).state, { timeout: 30_000 }).toBe("ready");
     const packageDir = join(root, "books", bookId, "package");
     const ir = JSON.parse(readFileSync(join(packageDir, "book_ir.json"), "utf8"));
-    const chapters = ir.chapters.filter((chapter) => !chapter.is_noise && chapter.block_count > 0);
+    const chapters = ir.logical_sections?.length ? ir.logical_sections.map((section,spine_index)=>({...section,spine_index})) : ir.chapters.filter((chapter) => !chapter.is_noise && chapter.block_count > 0);
     expect(chapters.length).toBeGreaterThan(1);
     const chapterId = (chapter) => `chapter_${String(chapter.spine_index + 1).padStart(3, "0")}`;
     const first = chapterId(chapters[0]);
     const second = chapterId(chapters[1]);
     const partialContent = await api(`${bookPath}/chapters/${second}/content`);
     const partialBlock = partialContent.blocks.find((block) => Array.from(block.text).length > 15);
-    const partialLocation = { chapter_id: second, block_id: partialBlock.block_id, char_offset: 5, epub_cfi: null };
+    const partialLocation = { chapter_id: second, block_id: partialBlock.block_id, char_offset: 12, epub_cfi: null };
     await api(`${bookPath}/ask`, "POST", {
-      question: "What happens after this point?",
+      question: Array.from(partialBlock.text).slice(0,12).join(""),
       reader_state: { session_id: null, current_location: partialLocation, read_until: partialLocation, completed_chapter_ids: [], progress_basis_points: 0 },
       spoiler_mode: "read_range",
     });
@@ -84,7 +84,7 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     const unreadIds = partialContent.blocks.slice(boundaryIndex + 1).map((block) => block.block_id);
     expect(partialContext.nearby_blocks.some((block) => unreadIds.includes(block.block_id))).toBe(false);
     const boundaryBlock = partialContext.nearby_blocks.find((block) => block.block_id === partialBlock.block_id);
-    if (boundaryBlock) expect(Array.from(boundaryBlock.text).length).toBeLessThanOrEqual(5);
+    if (boundaryBlock) expect(Array.from(boundaryBlock.text).length).toBeLessThanOrEqual(12);
     expect(partialContext.chapter_analysis).toBeNull();
     await api(`${bookPath}/chapters/${second}/checkpoint`, "POST", {
       reader_state: { session_id: null, current_location: partialLocation, read_until: partialLocation, completed_chapter_ids: [], progress_basis_points: 0 },
@@ -211,7 +211,7 @@ test("real HTTP upload, reader actions, exports, restart and browser reading", a
     await page.locator('#selection-menu [data-intent="read"]').click();
     await expect.poll(async () => (await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState))).read_coverage.length).toBe(1);
     browserState = await page.evaluate(() => JSON.parse(document.body.dataset.codexiaReaderState));
-    const boundaryAsk = await fetch(`${readerUrl}${bookPath}/ask`, {method:"POST",body:JSON.stringify({question:"What have I read?",reader_state:browserState,spoiler_mode:"read_range"})});
+    const boundaryAsk = await fetch(`${readerUrl}${bookPath}/ask`, {method:"POST",body:JSON.stringify({question:selected.text,reader_state:browserState,spoiler_mode:"read_range"})});
     expect(boundaryAsk.status).toBe(200);
     const scoped = JSON.parse(readFileSync(contextFile, "utf8"));
     expect(scoped.context.allowed_chapter_ids).toEqual([second]);

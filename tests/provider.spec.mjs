@@ -26,9 +26,10 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
   });
   expect(result.error).toBeUndefined();
   expect(result.status).toBe(1);
-  expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["chapter_analysis"]);
+  const operations=readFileSync(calls, "utf8").trim().split("\n");
+  expect(operations.length).toBeGreaterThan(0);expect([...new Set(operations)]).toEqual(["chapter_analysis"]);
   const events = readdirSync(join(root, "provider")).map((id) => JSON.parse(readFileSync(join(root, "provider", id, "event.json"), "utf8")));
-  expect(events[0].status).toBe("invalid_output");
+  expect(events.every(event=>event.status==="invalid_output")).toBe(true);
   expect(JSON.parse(readFileSync(join(output, "compile_status.json"), "utf8")).ready_stages).toEqual(["parse", "normalize"]);
   writeFileSync(info.outputPath("provider-failure.log"), result.stderr);
 });

@@ -21,6 +21,7 @@ use crate::ir::{Block, BookIr, Chapter, Profile, TocEntry};
 
 /// Version of the persisted chapter-analysis document and provider protocol.
 pub const CHAPTER_ANALYSIS_VERSION: &str = "0.1";
+const PROMPT_PROTOCOL_VERSION: &str = "0.2";
 
 /// System rules shared by every chapter-analysis prompt.
 pub const CHAPTER_ANALYSIS_SYSTEM_PROMPT: &str = r#"You analyze exactly one chapter of a book. Use only the supplied chapter blocks, table of contents, and prior-chapter context. Define concepts as this book uses them. Every evidence-bearing claim, difficult passage, and entity appearance must cite supplied block IDs with character offsets. Do not cite later chapters, invent sources, or wrap the JSON response in Markdown. Return one JSON object matching output_schema."#;
@@ -92,7 +93,7 @@ pub struct TocContext {
 pub struct PriorChapterContext {
     pub chapter_id: String,
     pub title: String,
-    pub condensed_summary: String,
+    pub source_excerpts: Vec<PromptBlock>,
 }
 
 /// Full normalized content for the current chapter.
@@ -363,7 +364,7 @@ pub fn analysis_key(
     let descriptor = serde_json::json!({
         "source_hash":source_hash,"profile":profile,"analyze_through":analyze_through,"analyzer":hash(&bytes),
         "compiler":env!("CARGO_PKG_VERSION"),"pipeline":crate::pipeline::ANALYZER_PIPELINE_VERSION,
-        "chapter_protocol":CHAPTER_ANALYSIS_VERSION,"chapter_prompt":CHAPTER_ANALYSIS_SYSTEM_PROMPT,"chapter_schema":OUTPUT_SCHEMA,"tasks":PROMPT_TASKS,
+        "chapter_protocol":PROMPT_PROTOCOL_VERSION,"chapter_prompt":CHAPTER_ANALYSIS_SYSTEM_PROMPT,"chapter_schema":OUTPUT_SCHEMA,"tasks":PROMPT_TASKS,
         "synthesis":crate::book_analysis::synthesis_signature(),
         "model":std::env::var("CODEXIA_ANALYZER_MODEL").ok(),"prompt":std::env::var("CODEXIA_ANALYZER_PROMPT_VERSION").ok(),"revision":std::env::var("CODEXIA_ANALYZER_REVISION").ok()
     });
@@ -560,20 +561,42 @@ fn build_request(
         )));
     }
 
+    // ponytail: scan prior blocks per chapter; add an index if long-book trial timings require it.
+    let candidates = book
+        .blocks
+        .iter()
+        .filter(|block| block.chapter_index < chapter.spine_index)
+        .collect::<Vec<_>>();
+    let query = blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let selected =
+        crate::retrieval::rank(&query, candidates.iter().map(|block| block.text.as_ref()))
+            .into_iter()
+            .filter(|index| candidates[*index].text.len() <= 8192)
+            .take(8)
+            .map(|index| candidates[index])
+            .collect::<Vec<_>>();
     let prior_chapters = book.chapters[..chapter_position]
         .iter()
         .filter(|prior| !prior.is_noise && prior.block_count > 0)
         .map(|prior| PriorChapterContext {
             chapter_id: chapter_id(prior.spine_index),
             title: prior.title.to_string(),
-            condensed_summary: condense(&prior.visible_text, 600),
+            source_excerpts: selected
+                .iter()
+                .filter(|block| block.chapter_index == prior.spine_index)
+                .map(|block| prompt_block(block))
+                .collect(),
         })
         .collect();
     let output_schema = serde_json::from_str(OUTPUT_SCHEMA)
         .map_err(|error| AnalysisError::new(format!("invalid embedded output schema: {error}")))?;
 
     Ok(ChapterAnalysisRequest {
-        protocol_version: CHAPTER_ANALYSIS_VERSION,
+        protocol_version: PROMPT_PROTOCOL_VERSION,
         task: "chapter_analysis",
         analysis_profile: profile_name(profile),
         profile_instruction: profile_instruction(profile),
@@ -673,15 +696,6 @@ pub const fn profile_instruction(profile: Profile) -> &'static str {
             "Be comprehensive: preserve nuanced arguments, counterpoints, relations, and difficult passages."
         }
     }
-}
-
-fn condense(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut condensed = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        condensed.push('…');
-    }
-    condensed
 }
 
 /// Error returned by prompt construction, providers, scheduling, or output.

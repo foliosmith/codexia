@@ -14,6 +14,7 @@ pub mod normalizer;
 pub mod pipeline;
 pub mod public_api;
 pub mod reader_cards;
+mod retrieval;
 pub mod runtime_api;
 pub mod sections;
 pub mod studio;

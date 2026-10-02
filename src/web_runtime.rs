@@ -1087,7 +1087,7 @@ impl WebRuntime {
         if request.selected_text.trim().is_empty() {
             return Err(RuntimeError::bad_request("selected_text must not be empty"));
         }
-        let (context, boundary) = self.assemble_context(
+        let (mut context, boundary) = self.assemble_context(
             Some(&request.source_ref),
             &request.reader_state,
             request.spoiler_mode,
@@ -1107,11 +1107,24 @@ impl WebRuntime {
                 "selected_text does not match source_ref range",
             ));
         }
+        if request.intent == "connect" {
+            let before = context.selected_block.as_ref().map(|b| b.chapter_index);
+            let retrieved = self.retrieve(&request.selected_text, &boundary, before)?;
+            for block in retrieved {
+                if !context
+                    .nearby_blocks
+                    .iter()
+                    .any(|b| b.block_id == block.block_id)
+                {
+                    context.nearby_blocks.push(block);
+                }
+            }
+        }
         let input = json!({
             "intent": request.intent,
             "selected_text": request.selected_text,
             "source_ref": request.source_ref,
-            "answer_policy": {"must_cite": true, "use_only_read_range": request.spoiler_mode == SpoilerMode::ReadRange},
+            "answer_policy": {"must_cite": true, "refuse_if_evidence_insufficient":true,"use_only_read_range": request.spoiler_mode == SpoilerMode::ReadRange},
         });
         let cards = if let Some(cards) = self.run_agent(
             "explain_passage",
@@ -1135,13 +1148,24 @@ impl WebRuntime {
         if request.question.trim().is_empty() {
             return Err(RuntimeError::bad_request("question must not be empty"));
         }
-        let (context, boundary) =
-            self.assemble_context(None, &request.reader_state, request.spoiler_mode)?;
+        let (boundary, allowed) = self.boundary(&request.reader_state, request.spoiler_mode)?;
+        let context = AssembledContext {
+            book_title: self.book.title.clone(),
+            selected_block: None,
+            nearby_blocks: self.retrieve(&request.question, &boundary, None)?,
+            chapter_analysis: None,
+            related_concepts: Vec::new(),
+            argument_flow: Vec::new(),
+            allowed_chapter_ids: allowed.into_iter().collect(),
+            excluded_chapter_ids: boundary.excluded_chapter_ids.clone(),
+        };
         let input = json!({
             "question": request.question,
-            "answer_policy": {"must_cite": true, "use_only_read_range": request.spoiler_mode == SpoilerMode::ReadRange},
+            "answer_policy": {"must_cite": true, "refuse_if_evidence_insufficient":true,"use_only_read_range": request.spoiler_mode == SpoilerMode::ReadRange},
         });
-        let cards = if let Some(cards) = self.run_agent(
+        let cards = if context.nearby_blocks.is_empty() {
+            vec![self.fallback_answer(&request.question, &context, &boundary)]
+        } else if let Some(cards) = self.run_agent(
             "ask_book",
             input,
             &context,
@@ -1350,7 +1374,7 @@ impl WebRuntime {
         let request = AgentRequest {
             protocol_version: STATE_VERSION,
             task: task.to_owned(),
-            instruction: "Use only supplied context. Cite source_refs, honor spoiler boundary, and return cards matching output_schema.",
+            instruction: "Use only supplied source blocks. Cite source_refs only from selected_block or nearby_blocks, honor spoiler boundary, and return cards matching output_schema. If these blocks do not support an answer, explicitly state insufficient evidence and do not guess.",
             input,
             context: context.clone(),
             spoiler_boundary: boundary.clone(),
@@ -1384,12 +1408,9 @@ impl WebRuntime {
         }
         let mut request =
             serde_json::to_value(request).map_err(|_| RuntimeError::internal("invalid request"))?;
-        request["analysis_version"] = self
-            .book
-            .manifest
-            .get("analysis_key")
-            .cloned()
-            .unwrap_or_else(|| json!(self.book.source_hash));
+        request["analysis_version"] = book_analysis::read_compile_status(&self.book.package_dir)
+            .map(|status| json!(status.analysis_key))
+            .unwrap_or_else(|_| json!(self.book.source_hash));
         let diagnostics = self.state_dir.join("diagnostics");
         let result = agent.execute_action(&request, &cancel, &request_id, &diagnostics);
         self.active_actions
@@ -1417,6 +1438,21 @@ impl WebRuntime {
             .map_err(|_| RuntimeError::bad_gateway("invalid agent response"))
             .and_then(|response| {
                 self.validate_cards(&response.cards, boundary)?;
+                for reference in response.cards.iter().flat_map(|card| &card.source_refs) {
+                    let supplied = context
+                        .selected_block
+                        .iter()
+                        .chain(context.nearby_blocks.iter())
+                        .any(|block| {
+                            block.block_id == reference.block_id
+                                && reference.end_char <= block.text.chars().count()
+                        });
+                    if !supplied {
+                        return Err(RuntimeError::bad_gateway(
+                            "citation was not supplied as evidence",
+                        ));
+                    }
+                }
                 Ok(response)
             });
         let path = diagnostics.join(format!("{request_id}.json"));
@@ -1550,79 +1586,101 @@ impl WebRuntime {
         }
     }
 
+    fn retrieve(
+        &self,
+        query: &str,
+        boundary: &SpoilerBoundary,
+        before: Option<u32>,
+    ) -> Result<Vec<RuntimeBlock>, RuntimeError> {
+        let candidates = self
+            .book
+            .chapters
+            .iter()
+            .flat_map(|c| &c.blocks)
+            .filter(|b| before.is_none_or(|index| b.chapter_index < index))
+            .filter_map(|block| {
+                let visible = self.visible_chars(block, &boundary.read_coverage);
+                if visible == 0 {
+                    return None;
+                }
+                let mut block = block.clone();
+                block.text = block.text.chars().take(visible).collect();
+                Some(block)
+            })
+            .collect::<Vec<_>>();
+        let ranked = crate::retrieval::rank(query, candidates.iter().map(|b| b.text.as_str()));
+        let mut remaining = crate::execution::limit("CODEXIA_MAX_CONTEXT_BYTES", 512 * 1024) / 2;
+        let has_matches = !ranked.is_empty();
+        let selected = ranked
+            .into_iter()
+            .filter_map(|index| {
+                let block = &candidates[index];
+                let bytes = block.text.len() + 256;
+                if bytes > remaining {
+                    return None;
+                }
+                remaining -= bytes;
+                Some(block.clone())
+            })
+            .take(8)
+            .collect::<Vec<_>>();
+        if has_matches && selected.is_empty() {
+            return Err(RuntimeError {
+                status: 413,
+                code: "context_too_large",
+                message: "matching evidence exceeds context budget".into(),
+            });
+        }
+        Ok(selected)
+    }
+
     fn fallback_answer(
         &self,
         question: &str,
         context: &AssembledContext,
         boundary: &SpoilerBoundary,
     ) -> RuntimeCard {
-        // ponytail: deterministic keyword matching keeps offline mode useful;
-        // use --agent-command when semantic retrieval quality matters.
-        let normalized = question.to_lowercase();
-        let allowed = context.allowed_chapter_ids.iter().cloned().collect();
-        let visible_reference = |reference: &AnalysisSourceRef| {
-            self.validate_source_ref(reference, &allowed).is_ok()
-                && self
-                    .validate_read_limit(reference, &boundary.read_coverage)
-                    .is_ok()
-        };
-        let concept = self
-            .book
-            .documents
-            .concepts
-            .concepts
+        let refs = context
+            .nearby_blocks
             .iter()
-            .filter(|concept| {
-                !concept.appearances.is_empty() && concept.appearances.iter().all(visible_reference)
+            .map(|b| AnalysisSourceRef {
+                block_id: b.block_id.clone(),
+                start_char: 0,
+                end_char: b.text.chars().count(),
+                text_fingerprint: b.text_fingerprint.clone(),
             })
-            .find(|concept| {
-                normalized.contains(&concept.name.to_lowercase())
-                    || concept
-                        .aliases
-                        .iter()
-                        .any(|alias| normalized.contains(&alias.to_lowercase()))
-            });
-        let (answer, refs) = if let Some(concept) = concept {
-            (
-                concept.definition_in_this_book.clone(),
-                concept.appearances.clone(),
-            )
-        } else if let Some(claim) = self.book.documents.claims.claims.iter().find(|claim| {
-            !claim.supporting_evidence.is_empty()
-                && claim
-                    .supporting_evidence
-                    .iter()
-                    .all(|evidence| visible_reference(&evidence.source_ref))
-        }) {
-            (
-                claim.claim.clone(),
-                claim
-                    .supporting_evidence
-                    .iter()
-                    .map(|evidence| evidence.source_ref.clone())
-                    .collect(),
-            )
+            .collect::<Vec<_>>();
+        let insufficient = refs.is_empty();
+        let answer = if insufficient {
+            "已读范围内没有足够的相关原文证据，无法回答。请选中相关段落或补充更具体的关键词。"
+                .to_owned()
         } else {
-            (
-                context.chapter_analysis.as_ref().map_or_else(
-                    || "当前已读范围内没有可用分析。".to_owned(),
-                    |analysis| analysis.generated.summary.short.clone(),
-                ),
-                Vec::new(),
+            format!(
+                "检索到以下原文；离线模式仅展示证据，不推断答案：\n{}",
+                context
+                    .nearby_blocks
+                    .iter()
+                    .map(|b| b.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
             )
         };
-        let grounded = !refs.is_empty();
         RuntimeCard {
             card_type: RuntimeCardType::Answer,
-            card_id: "answer-current".to_owned(),
-            title: "回答".to_owned(),
-            content: json!({"question": question, "answer": answer}),
-            source_refs: refs,
-            confidence_basis_points: if grounded { 8_000 } else { 5_000 },
-            grounding: if grounded {
-                Grounding::Grounded
+            card_id: "answer-evidence".into(),
+            title: if insufficient {
+                "证据不足"
             } else {
+                "相关原文"
+            }
+            .into(),
+            content: json!({"question":question,"answer":answer,"insufficient_evidence":insufficient}),
+            source_refs: refs,
+            confidence_basis_points: 0,
+            grounding: if insufficient {
                 Grounding::Inferred
+            } else {
+                Grounding::Grounded
             },
             spoiler_status: spoiler_status(boundary),
             follow_up_actions: Vec::new(),
@@ -2221,6 +2279,16 @@ impl WebRuntime {
                 HttpResponse::json(200, &self.book.documents.concepts)
             }
             ["claims"] if method == "GET" => HttpResponse::json(200, &self.book.documents.claims),
+            ["blocks", block_id, "location"] if method == "GET" => {
+                let block = self
+                    .book
+                    .block(block_id)
+                    .ok_or_else(|| RuntimeError::not_found("unknown block"))?;
+                HttpResponse::json(
+                    200,
+                    json!({"chapter_id":block.chapter_id,"block_id":block.block_id}),
+                )
+            }
             ["chapters", chapter_id, "content"] if method == "GET" => {
                 let chapter = self.book.chapter(chapter_id)?;
                 HttpResponse::json(200, chapter)
@@ -2327,7 +2395,37 @@ fn serve_surface(
     serve_http(
         bind,
         home,
-        Arc::new(move |request| runtime.dispatch(&request.method, &request.target, &request.body)),
+        Arc::new(move |request| {
+            let host = request
+                .headers
+                .get("host")
+                .map(String::as_str)
+                .unwrap_or("");
+            let local_host = host
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|address| address.ip().is_loopback())
+                || host
+                    .strip_prefix("localhost:")
+                    .is_some_and(|port| port.parse::<u16>().is_ok());
+            let same_origin = request
+                .headers
+                .get("origin")
+                .is_none_or(|origin| origin == &format!("http://{host}"));
+            if !local_host
+                || !same_origin
+                || request
+                    .headers
+                    .get("sec-fetch-site")
+                    .is_some_and(|site| site == "cross-site")
+            {
+                return HttpResponse::error(RuntimeError {
+                    status: 403,
+                    code: "invalid_origin",
+                    message: "local reader requires a same-origin request".into(),
+                });
+            }
+            runtime.dispatch(&request.method, &request.target, &request.body)
+        }),
     )
 }
 

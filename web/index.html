@@ -305,7 +305,7 @@
       document.querySelector('#chapter-blocks').addEventListener('mouseup', captureSelection);
       document.querySelector('#mark-chapter-read').addEventListener('click', () => markRead(state.chapter.blocks.at(-1)));
       document.querySelector('#checkpoint-button').addEventListener('click', loadCheckpoint);
-      document.querySelector('.agent-panel').addEventListener('click', handleAgentClick);
+      document.querySelector('.agent-panel').onclick = handleAgentClick;
       bindChat();
       const end = document.querySelector('#chapter-end');
       state.endObserver?.disconnect();
@@ -313,7 +313,7 @@
       state.endObserver.observe(end);
     }
     function refreshAgentPanel() { document.querySelector('.agent-panel').innerHTML = agentPanelHtml(); bindReaderEventsAfterAgent(); }
-    function bindReaderEventsAfterAgent() { document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {state.tab = button.dataset.tab; refreshAgentPanel();})); document.querySelector('.agent-panel').addEventListener('click', handleAgentClick); bindChat(); }
+    function bindReaderEventsAfterAgent() { document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {state.tab = button.dataset.tab; refreshAgentPanel();})); document.querySelector('.agent-panel').onclick = handleAgentClick; bindChat(); }
     function bindChat() { const form = document.querySelector('#chat-form'); if (form) form.addEventListener('submit', askBook); }
 
     function captureSelection() {
@@ -382,7 +382,13 @@
       catch (error) { showAgentError(error); }
     }
     function showConcept(id) { const concept = visibleConcepts().find(item => item.concept_id === id); if (!concept) return; state.cards = [{title:concept.name, content:{answer:concept.definition_in_this_book}, source_refs:concept.appearances, grounding:concept.grounding, confidence_basis_points:8000}]; state.tab='context'; refreshAgentPanel(); }
-    function handleAgentClick(event) { const blockId = event.target.dataset.sourceBlock; if (blockId) document.getElementById(blockId)?.scrollIntoView({block:'center'}); }
+    async function handleAgentClick(event) {
+      const blockId=event.target.closest('[data-source-block]')?.dataset.sourceBlock; if(!blockId)return;
+      try { const location=await api(bookPath(`/blocks/${encodeURIComponent(blockId)}/location`));
+        if(location.chapter_id!==state.chapter.chapter_id){history.replaceState(null,'',`#read/${location.chapter_id}`);await renderReader(location.chapter_id);}
+        document.getElementById(blockId)?.scrollIntoView({block:'center'});
+      }catch(error){showAgentError(error);}
+    }
     function showAgentError(error) { state.cards = [{title:'操作失败',content:{answer:error.message},source_refs:[],grounding:'inferred',confidence_basis_points:0}]; refreshAgentPanel(); }
 
     async function loadCheckpoint() {
