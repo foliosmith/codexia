@@ -365,6 +365,7 @@ struct AgentRequest {
     instruction: &'static str,
     input: Value,
     context: AssembledContext,
+    evidence_refs: Vec<AnalysisSourceRef>,
     spoiler_boundary: SpoilerBoundary,
     output_schema: Value,
 }
@@ -1371,12 +1372,30 @@ impl WebRuntime {
         let Some(agent) = &self.agent else {
             return Ok(None);
         };
+        let mut evidence_refs = context
+            .selected_block
+            .iter()
+            .chain(context.nearby_blocks.iter())
+            .map(|block| AnalysisSourceRef {
+                block_id: block.block_id.clone(),
+                start_char: 0,
+                end_char: block.text.chars().count(),
+                text_fingerprint: block.text_fingerprint.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(reference) = input.get("source_ref") {
+            evidence_refs.push(
+                serde_json::from_value(reference.clone())
+                    .map_err(|_| RuntimeError::internal("invalid supplied source reference"))?,
+            );
+        }
         let request = AgentRequest {
-            protocol_version: STATE_VERSION,
+            protocol_version: "0.2",
             task: task.to_owned(),
-            instruction: "Use only supplied source blocks. Cite source_refs only from selected_block or nearby_blocks, honor spoiler boundary, and return cards matching output_schema. If these blocks do not support an answer, explicitly state insufficient evidence and do not guess.",
+            instruction: "Use only supplied source blocks. Copy source_refs verbatim from evidence_refs; never estimate or change character offsets. Honor spoiler boundary, and return cards matching output_schema. If these blocks do not support an answer, explicitly state insufficient evidence and do not guess. For a refusal or any card without supporting source citations, use grounding=inferred, source_refs=[], and confidence_basis_points=0. Use grounded only when the supplied source text supports the card.",
             input,
             context: context.clone(),
+            evidence_refs:evidence_refs.clone(),
             spoiler_boundary: boundary.clone(),
             output_schema: runtime_card_schema(task),
         };
@@ -1439,14 +1458,7 @@ impl WebRuntime {
             .and_then(|response| {
                 self.validate_cards(&response.cards, boundary)?;
                 for reference in response.cards.iter().flat_map(|card| &card.source_refs) {
-                    let supplied = context
-                        .selected_block
-                        .iter()
-                        .chain(context.nearby_blocks.iter())
-                        .any(|block| {
-                            block.block_id == reference.block_id
-                                && reference.end_char <= block.text.chars().count()
-                        });
+                    let supplied = evidence_refs.contains(reference);
                     if !supplied {
                         return Err(RuntimeError::bad_gateway(
                             "citation was not supplied as evidence",
