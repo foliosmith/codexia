@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "const": "0.0"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,89}$"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,89}$"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "timed_out",
+        "cancelled",
+        "provider_error",
+        "budget_exceeded",
+        "not_applicable"
+      ]
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "artifact": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "call_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "known_usage_calls": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "protocol",
+    "attempt_id",
+    "case_id",
+    "status",
+    "duration_ms",
+    "artifact",
+    "artifact_hash",
+    "call_count",
+    "known_usage_calls"
+  ],
+  "additionalProperties": false
+}

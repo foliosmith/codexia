@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,89}$"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,89}$"
+    },
+    "artifact_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "judge_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "structural": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "evaluated",
+            "not_evaluated",
+            "not_applicable",
+            "missing_required"
+          ]
+        },
+        "passed": {
+          "enum": [
+            true,
+            false,
+            null
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "passed"
+      ],
+      "additionalProperties": false
+    },
+    "semantic": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "evaluated",
+            "not_evaluated",
+            "not_applicable",
+            "missing_required"
+          ]
+        },
+        "score": {
+          "enum": [
+            null,
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "state",
+        "score",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "hard_failures": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "task_success": {
+      "enum": [
+        true,
+        false,
+        null
+      ]
+    }
+  },
+  "required": [
+    "attempt_id",
+    "case_id",
+    "artifact_hash",
+    "judge_version",
+    "structural",
+    "semantic",
+    "hard_failures",
+    "task_success"
+  ],
+  "additionalProperties": false
+}
