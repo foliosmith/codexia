@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { cpSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { cpSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import { resolve, join } from 'node:path';
 
 const runner = resolve('benchmarks/runner.mjs');
@@ -136,4 +138,47 @@ test('benchmark binds reviews to artifacts and exports only aggregate fields', a
   expect(exported).not.toContain('attempts/');
   expect(exported).not.toContain('reviewer');
   expect(JSON.parse(exported).hard_failures).toBe(1);
+});
+
+test('benchmark resumes interrupted evidence without rerunning calls and verifies private EPUB identity', async ({}, info) => {
+  test.setTimeout(120000);
+  const suite = info.outputPath('suite');
+  cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+  for (const name of ['cases', 'gold']) {
+    const path = join(suite, `${name}.jsonl`);
+    writeFileSync(path, readFileSync(path, 'utf8').split('\n')[0] + '\n');
+  }
+  const catalogFile = join(suite, 'catalog.json');
+  const first = join(suite, 'first');
+  expect(invoke('run', '--catalog', catalogFile, '--output', first).status).toBe(0);
+  const epub = join(first, 'packages/river-study/source.epub');
+  const catalog = JSON.parse(readFileSync(catalogFile));
+  catalog.books[0].epub = { path: 'first/packages/river-study/source.epub', sha256: createHash('sha256').update(readFileSync(epub)).digest('hex') };
+  writeFileSync(catalogFile, JSON.stringify(catalog));
+  const run = join(suite, 'real-epub');
+  const args = ['--catalog', catalogFile, '--output', run];
+  expect(invoke('run', ...args).status).toBe(0);
+  const originalTrial = JSON.parse(readFileSync(join(run, 'trials.jsonl'), 'utf8'));
+  const attempt = join(run, 'attempts', originalTrial.attempt_id);
+  unlinkSync(join(attempt, 'trial.json'));
+  unlinkSync(join(attempt, 'artifact.json'));
+  expect(invoke('report', ...args).status).toBe(0);
+  expect(JSON.parse(readFileSync(join(run, 'report.json'))).missing_attempts).toBe(1);
+  expect(JSON.parse(readFileSync(join(run, 'report.json'))).independent_books).toBe(0);
+  const lock = join(run, '.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, host: hostname() }));
+  const live = invoke('resume', ...args);
+  expect(live.status).toBe(1);
+  expect(live.stderr).toContain('live process');
+  const ended = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  writeFileSync(lock, JSON.stringify({ pid: Number(ended.stdout), host: hostname() }));
+  expect(invoke('resume', ...args).status).toBe(1);
+  const recovered = JSON.parse(readFileSync(join(run, 'trials.jsonl'), 'utf8'));
+  expect(recovered.status).toBe('cancelled');
+  expect(recovered.call_count).toBe(originalTrial.call_count);
+  expect(JSON.parse(readFileSync(join(run, 'report.json'))).missing_attempts).toBe(0);
+  writeFileSync(epub, Buffer.from('changed source'));
+  const changed = invoke('validate', '--catalog', catalogFile);
+  expect(changed.status).toBe(1);
+  expect(changed.stderr).toContain('EPUB hash mismatch');
 });

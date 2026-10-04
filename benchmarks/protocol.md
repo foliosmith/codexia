@@ -9,7 +9,9 @@ Catalog, case, book and gold schemas live in `schemas/`. Original source anchors
 include chapter href, exact text and SHA-256. Runtime mapping must uniquely match
 the original href and text and must fail on ambiguity or loss. Runtime block IDs
 are not the sole gold locator. The controlled fixture format supports text-only
-paragraphs; real EPUB ingestion is a separate, not-yet-supported corpus path.
+paragraphs. Private catalogs can also bind these independent anchors to a
+fixed-hash real EPUB; annotating that source and verifying its rights remain
+explicit corpus work.
 
 Execution states and evaluation states are independent. Evaluation uses
 `evaluated`, `not_evaluated`, `not_applicable`, `missing_required`. Applicability

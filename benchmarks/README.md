@@ -46,8 +46,11 @@ All actual outputs must be under this checkout's `private/`, with no symlink
 components. Runs create a fresh directory; resume checks suite, binary, adapter,
 benchmark code and package hashes, retains finished attempts and marks interrupted
 attempts cancelled. Retries require a new run, so failures cannot be overwritten.
-A crash may leave `.lock`; verify its owner is no longer running before removing
-it. A failed compile must currently be restarted in a new run.
+Resume reclaims a same-host lock only when its recorded owner no longer exists;
+live and foreign-host locks are rejected. Interrupted captures retain their known
+calls and unknown usage. A hard-killed runner may leave Reader/adapter processes;
+inspect and stop those before treating failed-call accounting as final. Offline
+compilation can resume an existing package after source identity is checked.
 
 Exit 0 means the engineering run/report has no hard failures, **not** that model
 quality passed. `report.json` explicitly says `inconclusive` without reviewed
@@ -74,3 +77,14 @@ both candidates, not comparing old and new scores directly.
 explicit aggregate-field allowlist. It excludes case/book identities, paths,
 reviewer notes, text and attachments. It does not publish or copy anything into
 the public tree. Review the aggregate before sharing it externally.
+
+To use a private real EPUB, keep its independent anchor annotation in the book
+JSON and add `epub: {"path":"sources/book.epub","sha256":"..."}` to that book's
+local catalog entry. Both annotation and EPUB hashes are checked. Anchor hrefs
+and exact normalized paragraph text must uniquely match the runtime source; a
+mismatch is a mapping failure, never an automatically repaired gold answer.
+The annotation format supports nested EPUB-relative chapter hrefs. Annotate all
+reading endpoints and required evidence; it need not copy the whole book.
+The default compiler still uses offline registration and does not create a
+semantic baseline from the real EPUB. Version, rights and human gold review
+remain corpus preparation work.

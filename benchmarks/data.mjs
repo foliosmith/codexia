@@ -63,6 +63,12 @@ export function loadSuite(path) {
     }
     books.set(entry.id, { ...book, anchors, source });
     files.push(source);
+    if (entry.epub) {
+      const epub = resolve(base, entry.epub.path);
+      assert.equal(hash(readFileSync(epub)), entry.epub.sha256, `EPUB hash mismatch: ${entry.id}`);
+      books.get(entry.id).epub = epub;
+      files.push(epub);
+    }
   }
   const cases = lines(files[1]);
   assert.ok(cases.length, 'empty cases');

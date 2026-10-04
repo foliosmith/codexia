@@ -2,22 +2,40 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { root, read } from '../data.mjs';
+import { root, read, hash } from '../data.mjs';
 import { save, treeHash } from '../storage.mjs';
 
 export function compile(book, directory, binary) {
   mkdirSync(directory, { recursive: true });
   const epub = join(directory, 'source.epub');
-  execFileSync('python3', [join(root, 'benchmarks/adapters/build-fixture.py'), book.source, epub], { timeout: 10000 });
+  if (!existsSync(epub)) {
+    if (book.epub) copyFileSync(book.epub, epub);
+    else execFileSync('python3', [join(root, 'benchmarks/adapters/build-fixture.py'), book.source, epub], { timeout: 10000 });
+    save(join(directory, 'source-identity.json'), { sha256: hash(readFileSync(epub)) });
+  }
+  assert.equal(hash(readFileSync(epub)), read(join(directory, 'source-identity.json')).sha256, 'compile source changed');
   const pkg = join(directory, 'package');
   const start = performance.now();
   const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', join(root, 'tests/fixtures/analyzer.mjs'), '--analysis-jobs', '1'], { timeout: 120000, env: { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '' } });
   execFileSync(binary, ['validate', pkg], { timeout: 10000 });
   save(join(directory, 'compile.json'), { mode: 'offline-registration', duration_ms: Math.round(performance.now() - start), usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
   return pkg;
+}
+
+export function collectCalls(directory) {
+  const calls = join(directory, 'calls');
+  if (!existsSync(calls)) return [];
+  return readdirSync(calls).sort().map(id => {
+    const path = join(calls, id);
+    let event = { id, status: 'interrupted', usage: null };
+    try { event = { ...event, ...read(join(path, 'event.json')) }; } catch { /* Keep interrupted calls in accounting. */ }
+    let request = null;
+    try { request = read(join(path, 'request.json')); } catch { /* Capture can be interrupted before a complete request. */ }
+    return { ...event, request, output: existsSync(join(path, 'output.txt')) ? readFileSync(join(path, 'output.txt'), 'utf8') : null };
+  });
 }
 
 async function address() {
@@ -120,8 +138,7 @@ export async function execute({ item, book, pkg, directory, binary, agent, signa
       else { try { process.kill(-server.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
       await exited;
     }
-    const calls = join(directory, 'calls');
-    if (existsSync(calls)) result.calls = readdirSync(calls).sort().map(id => ({ ...read(join(calls, id, 'event.json')), request: read(join(calls, id, 'request.json')), output: existsSync(join(calls, id, 'output.txt')) ? readFileSync(join(calls, id, 'output.txt'), 'utf8') : null }));
+    result.calls = collectCalls(directory);
     if (result.calls.some(call => call.status === 'timed_out') && result.status !== 'cancelled') result.status = 'timed_out';
   }
   return result;

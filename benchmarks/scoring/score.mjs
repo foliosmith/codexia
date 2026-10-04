@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hash, check } from '../data.mjs';
-import { save } from '../storage.mjs';
+import { save, privatePath } from '../storage.mjs';
 import { applyReview } from './review.mjs';
 
 export function score(trial, item, artifact) {
@@ -31,7 +31,7 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
   const scores = trials.map(trial => {
     check('trial', trial);
     if (trial.artifact !== `attempts/${trial.attempt_id}/artifact.json`) throw new Error('invalid artifact path');
-    const bytes = readFileSync(join(directory, trial.artifact));
+    const bytes = readFileSync(privatePath(join(directory, trial.artifact)));
     if (hash(bytes) !== trial.artifact_hash) throw new Error(`artifact hash mismatch: ${trial.attempt_id}`);
     const item = suite.cases.find(item => item.id === trial.case_id);
     if (!item) throw new Error('unknown trial case');
@@ -41,9 +41,29 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
   });
   const counts = values => Object.fromEntries([...new Set(values)].map(value => [value, values.filter(v => v === value).length]));
   const execution = counts(trials.map(t => t.status));
+  function group(key) {
+    const groups = {};
+    for (const [index, trial] of trials.entries()) {
+      const item = suite.cases.find(c => c.id === trial.case_id);
+      const values = key(item);
+      for (const value of new Set(values)) {
+        const group = groups[value] ??= { attempts: 0, completed: 0, structural_passes: 0, semantic_evaluated: 0, successes: 0, hard_failures: 0 };
+        group.attempts++;
+        group.completed += Number(trial.status === 'completed');
+        group.structural_passes += Number(scores[index].structural.passed === true);
+        group.semantic_evaluated += Number(scores[index].semantic.state === 'evaluated');
+        group.successes += Number(scores[index].task_success === true);
+        group.hard_failures += Number(scores[index].hard_failures.length > 0);
+      }
+    }
+    return groups;
+  }
   const result = {
     protocol: '0.0', evidence: manifest.evidence, candidate: manifest.candidate,
-    attempts: trials.length, independent_cases: new Set(trials.map(t => t.case_id)).size, independent_books: suite.books.size,
+    attempts: trials.length, independent_cases: new Set(trials.map(t => t.case_id)).size,
+    independent_books: new Set(trials.map(t => suite.cases.find(c => c.id === t.case_id).book_id)).size,
+    expected_attempts: suite.cases.length * manifest.repeat,
+    missing_attempts: suite.cases.length * manifest.repeat - trials.length,
     execution, structural_passes: scores.filter(s => s.structural.passed).length,
     hard_failures: scores.filter(s => s.hard_failures.length).length,
     semantic_evaluated: scores.filter(s => s.semantic.state === 'evaluated').length,
@@ -52,8 +72,8 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     calls: trials.reduce((sum, t) => sum + t.call_count, 0), usage_coverage: { known_calls: trials.reduce((sum, t) => sum + t.known_usage_calls, 0), total_calls: trials.reduce((sum, t) => sum + t.call_count, 0) },
     costs: { compile_usd: null, answer_usd: null, judge_usd: null, basis: 'Unpriced offline/replay evidence; not an invoice.' },
     duration_ms: trials.map(t => t.duration_ms),
-    dimensions: Object.fromEntries([...new Set(suite.cases.flatMap(c => c.dimensions))].map(d => [d, { attempts: trials.filter(t => suite.cases.find(c => c.id === t.case_id).dimensions.includes(d)).length }])),
-    limitations: ['Draft gold is not independent human review.', 'Offline registration compilation and source extraction do not establish model quality even when sample reviews pass.', 'Held-out isolation and real EPUB corpus ingestion are not implemented.'],
+    dimensions: group(c => c.dimensions), books: group(c => [c.book_id]), languages: group(c => [suite.books.get(c.book_id).language]), tasks: group(c => c.steps.map(s => s.task)), suites: group(c => [c.suite]),
+    limitations: ['Draft gold is not independent human review.', 'Offline registration compilation and source extraction do not establish model quality even when sample reviews pass.', 'Held-out process isolation and online budget enforcement are not implemented.'],
     scores,
   };
   save(join(directory, 'report.json'), result);

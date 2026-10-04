@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { hash, root } from './data.mjs';
+import { openSync, closeSync, unlinkSync } from 'node:fs';
+import { hostname } from 'node:os';
 
 export function privatePath(path) {
   const base = join(root, 'private');
@@ -36,4 +38,28 @@ export function treeHash(directory) {
   }
   walk(directory);
   return hash(JSON.stringify(files));
+}
+
+export function acquireLock(directory, recover) {
+  const path = privatePath(join(directory, '.lock'));
+  let recovery;
+  try {
+    if (recover && existsSync(path)) {
+      recovery = openSync(`${path}.recovery`, 'wx', 0o600);
+      const raw = readFileSync(path, 'utf8');
+      const owner = JSON.parse(raw);
+      assert.equal(owner.host, hostname(), 'cannot reclaim a lock from another host');
+      assert.ok(Number.isSafeInteger(owner.pid) && owner.pid > 0, 'invalid lock owner');
+      let dead = false;
+      try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') dead = true; else throw error; }
+      assert.ok(dead, 'run is already locked by a live process');
+      assert.equal(readFileSync(path, 'utf8'), raw, 'lock changed during recovery');
+      unlinkSync(path);
+    }
+    const fd = openSync(path, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify({ pid: process.pid, host: hostname() }));
+    return () => { closeSync(fd); unlinkSync(path); };
+  } finally {
+    if (recovery !== undefined) { closeSync(recovery); unlinkSync(`${path}.recovery`); }
+  }
 }

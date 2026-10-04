@@ -32,7 +32,7 @@
         "properties": {
           "href": {
             "type": "string",
-            "pattern": "^[a-z0-9_-]+\\.xhtml$"
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\?#\\u0000]+\\.(xhtml|html|htm)$"
           },
           "title": {
             "type": "string",

@@ -2,13 +2,13 @@
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { loadSuite, root, hash, read } from './data.mjs';
-import { privatePath, save, treeHash } from './storage.mjs';
-import { compile, execute } from './adapters/a0.mjs';
+import { privatePath, save, treeHash, acquireLock } from './storage.mjs';
+import { compile, execute, collectCalls } from './adapters/a0.mjs';
 import { report } from './scoring/score.mjs';
 import { template, validateReviews } from './scoring/review.mjs';
 
@@ -67,11 +67,9 @@ try {
       for (const [key, value] of Object.entries(identity)) assert.equal(manifest[key], value, `${key} changed; use a new run`);
       assert.equal(manifest.repeat, repeat, 'repeat changed');
     }
-    const lock = join(directory, '.lock');
-    let fd;
+    let release;
     try {
-      fd = openSync(lock, 'wx', 0o600);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+      release = acquireLock(directory, command === 'resume');
       if (['run', 'resume'].includes(command)) {
         for (const book of suite.books.values()) {
           if (controller.signal.aborted) break;
@@ -89,7 +87,7 @@ try {
               mkdirSync(attempt, { recursive: true });
               const started = performance.now();
               let artifact;
-              if (interrupted) artifact = { status: 'cancelled', error: 'Interrupted attempt retained; start a new run for a fresh attempt.', steps: [], calls: [] };
+              if (interrupted) artifact = existsSync(join(attempt, 'artifact.json')) ? read(join(attempt, 'artifact.json')) : { status: 'cancelled', error: 'Interrupted attempt retained; start a new run for a fresh attempt.', steps: [], calls: collectCalls(attempt) };
               else if (item.applicability === 'not_applicable') artifact = { status: 'not_applicable', steps: [], calls: [] };
               else {
                 try { artifact = await execute({ item, book, pkg, directory: attempt, binary, agent, signal: controller.signal }); }
@@ -118,14 +116,14 @@ try {
       console.log(JSON.stringify({ output: directory, attempts: result.attempts, quality: result.quality, evidence: result.evidence }));
       if (result.quality === 'fail' || controller.signal.aborted) process.exitCode = 1;
     } catch (error) {
-      if (fd !== undefined && ['run', 'resume'].includes(command)) {
+      if (release && ['run', 'resume'].includes(command)) {
         manifest.status = 'failed';
         save(join(directory, 'manifest.json'), manifest);
         summarize(directory, manifest, suite);
       }
       throw error;
     } finally {
-      if (fd !== undefined) { closeSync(fd); unlinkSync(lock); }
+      release?.();
     }
   }
 } catch (error) {
