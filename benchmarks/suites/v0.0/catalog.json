@@ -1,0 +1,13 @@
+{
+  "version": "0.0",
+  "split": "dev",
+  "books": [
+    {
+      "id": "river-study",
+      "path": "fixtures/river-study.json",
+      "sha256": "6f46081518995d944125c4b326c45ea817cbfd64e15b791f7ea3c3a07bc22580"
+    }
+  ],
+  "cases": "cases.jsonl",
+  "gold": "gold.jsonl"
+}

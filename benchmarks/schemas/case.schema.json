@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,79}$"
+    },
+    "book_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,79}$"
+    },
+    "suite": {
+      "enum": [
+        "regression",
+        "capability"
+      ]
+    },
+    "dimensions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^D(0[1-9]|1[0-8])$"
+      },
+      "minItems": 1
+    },
+    "applicability": {
+      "enum": [
+        "applicable",
+        "not_applicable"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task": {
+            "enum": [
+              "ask",
+              "explain",
+              "reflect"
+            ]
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1
+          },
+          "selection": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,79}$"
+          },
+          "answer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "read": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "anchor": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,79}$"
+                },
+                "end_char": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "anchor"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "task",
+          "read"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000
+        },
+        "max_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "timeout_ms",
+        "max_calls"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "book_id",
+    "suite",
+    "dimensions",
+    "applicability",
+    "steps",
+    "budget"
+  ],
+  "additionalProperties": false
+}
