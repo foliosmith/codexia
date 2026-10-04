@@ -8,6 +8,9 @@ node benchmarks/runner.mjs validate --catalog <local-catalog.json>
 node benchmarks/runner.mjs run --output private/benchmarks/runs/first
 node benchmarks/runner.mjs resume --output private/benchmarks/runs/first
 node benchmarks/runner.mjs report --output private/benchmarks/runs/first
+node benchmarks/runner.mjs review-template --output private/benchmarks/runs/first
+node benchmarks/runner.mjs score --output private/benchmarks/runs/first --reviews <completed-review.json>
+node benchmarks/runner.mjs export --output private/benchmarks/runs/first --reviews <completed-review.json>
 ```
 
 The public v0.0 development suite contains eight original controlled scenarios.
@@ -50,3 +53,24 @@ Exit 0 means the engineering run/report has no hard failures, **not** that model
 quality passed. `report.json` explicitly says `inconclusive` without reviewed
 semantics. Inspect `trials.jsonl`, `scores.jsonl` and per-attempt artifacts for
 failures, exact contexts and evidence. Actual logs and answers stay private.
+
+`review-template` writes an unfinished private review template. Semantic scoring
+requires reviewed gold (with an attributed reviewer) and four explicit checks:
+citation support, key-point coverage, spoiler boundary and attribution. Each
+check records 0–3, supports/refutes/insufficient, evidence and any hard failure.
+An attribution field records a claim of review; it cannot prove reviewer quality
+or independence. Do not mark machine-authored gold reviewed without that work.
+The shipped draft gold deliberately prevents accepting semantic reviews.
+
+`score` verifies case/gold/artifact identities and archives each assessment by
+review hash. Partial reviews remain visibly incomplete. A minimum score of 3
+across required dimensions is necessary for task success; hard failures always
+fail. Even complete passing reviews of offline outputs cannot establish online
+model quality. `report` without `--reviews` rebuilds the structural report; prior
+assessments remain under `assessments/`. Changing judge versions requires rescoring
+both candidates, not comparing old and new scores directly.
+
+`export` writes `export-summary.json` inside the private run directory using an
+explicit aggregate-field allowlist. It excludes case/book identities, paths,
+reviewer notes, text and attachments. It does not publish or copy anything into
+the public tree. Review the aggregate before sharing it externally.

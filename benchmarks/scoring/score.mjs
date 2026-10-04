@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hash, check } from '../data.mjs';
 import { save } from '../storage.mjs';
+import { applyReview } from './review.mjs';
 
 export function score(trial, item, artifact) {
   const failures = [];
@@ -26,7 +27,7 @@ export function score(trial, item, artifact) {
   return { attempt_id: trial.attempt_id, case_id: item.id, artifact_hash: trial.artifact_hash, judge_version: 'structural-0.0', structural: { state: na ? 'not_applicable' : 'evaluated', passed: na ? null : failures.length === 0 }, semantic: { state: na ? 'not_applicable' : 'not_evaluated', score: null, reason: na ? item.reason : 'No artifact-bound reviewed semantic assessment.' }, hard_failures: na ? [] : [...new Set(failures)], task_success: na ? null : failures.length ? false : null };
 }
 
-export function report(directory, manifest, suite, trials) {
+export function report(directory, manifest, suite, trials, reviews = new Map()) {
   const scores = trials.map(trial => {
     check('trial', trial);
     if (trial.artifact !== `attempts/${trial.attempt_id}/artifact.json`) throw new Error('invalid artifact path');
@@ -34,7 +35,7 @@ export function report(directory, manifest, suite, trials) {
     if (hash(bytes) !== trial.artifact_hash) throw new Error(`artifact hash mismatch: ${trial.attempt_id}`);
     const item = suite.cases.find(item => item.id === trial.case_id);
     if (!item) throw new Error('unknown trial case');
-    const result = score(trial, item, JSON.parse(bytes));
+    const result = applyReview(score(trial, item, JSON.parse(bytes)), reviews.get(trial.attempt_id));
     check('score', result);
     return result;
   });
@@ -45,12 +46,14 @@ export function report(directory, manifest, suite, trials) {
     attempts: trials.length, independent_cases: new Set(trials.map(t => t.case_id)).size, independent_books: suite.books.size,
     execution, structural_passes: scores.filter(s => s.structural.passed).length,
     hard_failures: scores.filter(s => s.hard_failures.length).length,
-    semantic_evaluated: 0, task_successes: 0, quality: scores.some(s => s.hard_failures.length) ? 'fail' : 'inconclusive',
+    semantic_evaluated: scores.filter(s => s.semantic.state === 'evaluated').length,
+    task_successes: scores.filter(s => s.task_success === true).length,
+    quality: scores.some(s => s.hard_failures.length || s.task_success === false) ? 'fail' : 'inconclusive',
     calls: trials.reduce((sum, t) => sum + t.call_count, 0), usage_coverage: { known_calls: trials.reduce((sum, t) => sum + t.known_usage_calls, 0), total_calls: trials.reduce((sum, t) => sum + t.call_count, 0) },
     costs: { compile_usd: null, answer_usd: null, judge_usd: null, basis: 'Unpriced offline/replay evidence; not an invoice.' },
     duration_ms: trials.map(t => t.duration_ms),
     dimensions: Object.fromEntries([...new Set(suite.cases.flatMap(c => c.dimensions))].map(d => [d, { attempts: trials.filter(t => suite.cases.find(c => c.id === t.case_id).dimensions.includes(d)).length }])),
-    limitations: ['Draft gold is not independent human review.', 'Offline registration compilation and source extraction do not establish model quality.', 'Held-out isolation and real EPUB corpus ingestion are not implemented.'],
+    limitations: ['Draft gold is not independent human review.', 'Offline registration compilation and source extraction do not establish model quality even when sample reviews pass.', 'Held-out isolation and real EPUB corpus ingestion are not implemented.'],
     scores,
   };
   save(join(directory, 'report.json'), result);
