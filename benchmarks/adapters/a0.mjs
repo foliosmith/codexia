@@ -79,6 +79,7 @@ export async function execute({ item, book, pkg, directory, binary, agent, signa
     }
     assert.ok(ready, 'Reader startup timeout');
     const bootstrap = await api('/v1/bootstrap');
+    result.package_eval = await api('/v1/studio/evals', {});
     const bookPath = `/v1/books/${bootstrap.book.book_id}`;
     const ir = read(join(pkg, 'book_ir.json'));
     const blocks = new Map();

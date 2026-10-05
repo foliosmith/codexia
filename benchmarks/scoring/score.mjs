@@ -28,6 +28,8 @@ export function score(trial, item, artifact) {
 }
 
 export function report(directory, manifest, suite, trials, reviews = new Map()) {
+  const retrieval = [];
+  const packageEvaluations = {};
   const scores = trials.map(trial => {
     check('trial', trial);
     if (trial.artifact !== `attempts/${trial.attempt_id}/artifact.json`) throw new Error('invalid artifact path');
@@ -35,7 +37,17 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     if (hash(bytes) !== trial.artifact_hash) throw new Error(`artifact hash mismatch: ${trial.attempt_id}`);
     const item = suite.cases.find(item => item.id === trial.case_id);
     if (!item) throw new Error('unknown trial case');
-    const result = applyReview(score(trial, item, JSON.parse(bytes)), reviews.get(trial.attempt_id));
+    const artifact = JSON.parse(bytes);
+    if (artifact.package_eval) packageEvaluations[item.book_id] = artifact.package_eval;
+    const gold = suite.gold.get(item.id);
+    const offered = artifact.calls.flatMap(call => call.request?.evidence_refs || []);
+    const fractions = gold.evidence_sets.map(set => set.filter(anchor => {
+      const block = artifact.anchors?.[anchor];
+      return block && offered.some(ref => ref.block_id === block.block_id && ref.text_fingerprint === block.text_fingerprint && ref.start_char === 0 && ref.end_char === [...block.text].length);
+    }).length / set.length);
+    const mapped = Boolean(artifact.anchors);
+    retrieval.push({ attempt_id: trial.attempt_id, gold_status: gold.status, state: !fractions.length ? 'not_applicable' : mapped ? 'evaluated' : 'not_evaluated', best_evidence_set_recall: fractions.length && mapped ? Math.max(...fractions) : null, complete_evidence_set: fractions.length && mapped ? fractions.includes(1) : null, basis: 'Full annotated source blocks offered to the provider, not semantic support or answer correctness.' });
+    const result = applyReview(score(trial, item, artifact), reviews.get(trial.attempt_id));
     check('score', result);
     return result;
   });
@@ -74,6 +86,7 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     costs: { compile_usd: null, answer_usd: null, judge_usd: null, basis: 'Unpriced offline/replay evidence; not an invoice.' },
     duration_ms: trials.map(t => t.duration_ms),
     dimensions: group(c => c.dimensions), books: group(c => [c.book_id]), languages: group(c => [suite.books.get(c.book_id).language]), tasks: group(c => c.steps.map(s => s.task)), suites: group(c => [c.suite]),
+    package_evaluations: packageEvaluations, retrieval,
     limitations: ['Draft gold is not independent human review.', 'Offline registration compilation and source extraction do not establish model quality even when sample reviews pass.', 'Held-out process isolation and online budget enforcement are not implemented.'],
     scores,
   };

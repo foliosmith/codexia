@@ -133,3 +133,15 @@ reading endpoints and required evidence; it need not copy the whole book.
 The default compiler still uses offline registration and does not create a
 semantic baseline from the real EPUB. Version, rights and human gold review
 remain corpus preparation work.
+
+Reports retain the existing Studio package evaluation separately from task
+scores. An offline registration package can be structurally valid while its
+required semantic outputs or Beta review are missing. Retrieval diagnostics
+measure whether a complete annotated evidence set was offered to the provider;
+they do not measure whether an answer was supported. Draft gold diagnostics stay
+labelled draft; attempts lacking source mappings remain unassessed.
+
+For the focused no-provider regression suite, build the local binary and run
+`npm --prefix tests run benchmark`. The suite uses original fixtures, exercises
+the real Reader, and retains evidence under `private/acceptance/benchmarks/`.
+This is a runnable developer gate, not an installed PR/release automation.

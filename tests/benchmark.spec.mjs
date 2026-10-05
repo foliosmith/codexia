@@ -42,6 +42,10 @@ test('benchmark runs real Reader attempts privately without claiming offline sem
   expect(report.semantic_evaluated).toBe(0);
   expect(report.task_successes).toBe(0);
   expect(report.evidence).toBe('offline');
+  expect(report.package_evaluations['river-study'].structural_valid).toBe(true);
+  expect(report.package_evaluations['river-study'].beta_ready).toBe(false);
+  expect(report.retrieval.find(r => r.attempt_id === 'citation-1').complete_evidence_set).toBe(true);
+  expect(report.retrieval.find(r => r.attempt_id === 'synonym-1').complete_evidence_set).toBe(false);
   const trials = readFileSync(join(run, 'trials.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const partial = trials.find(t => t.case_id === 'partial-read');
   const partialArtifact = JSON.parse(readFileSync(join(run, partial.artifact)));
