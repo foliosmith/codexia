@@ -17,7 +17,15 @@ const call = join(calls, id);
 mkdirSync(call);
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
-const input = Buffer.concat(chunks);
+let input = Buffer.concat(chunks);
+if (process.env.CODEXIA_BENCH_CANDIDATE === 'A1') {
+  const request = JSON.parse(input);
+  request.context.chapter_analysis = null;
+  request.context.related_concepts = [];
+  request.context.argument_flow = [];
+  delete request.input.expected_points;
+  input = Buffer.from(JSON.stringify(request));
+}
 writeFileSync(join(call, 'request.json'), input);
 writeFileSync(join(call, 'event.json'), JSON.stringify({ id, status: 'started', usage: null }));
 const started = performance.now();

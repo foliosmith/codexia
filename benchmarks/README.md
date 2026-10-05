@@ -6,6 +6,8 @@ Run from any directory with Node.js 22 or later:
 node benchmarks/runner.mjs validate
 node benchmarks/runner.mjs validate --catalog <local-catalog.json>
 node benchmarks/runner.mjs run --output private/benchmarks/runs/first
+node benchmarks/runner.mjs run --candidate A1 --output private/benchmarks/runs/raw-source
+node benchmarks/runner.mjs compare --left private/benchmarks/runs/first --right private/benchmarks/runs/raw-source --output private/benchmarks/comparisons/first
 node benchmarks/runner.mjs resume --output private/benchmarks/runs/first
 node benchmarks/runner.mjs report --output private/benchmarks/runs/first
 node benchmarks/runner.mjs review-template --output private/benchmarks/runs/first
@@ -99,6 +101,22 @@ checks input identity, duplicates, evidence, agreement and missing samples.
 These model-authored labels remain draft: `calibrated` is always false until a
 separate human validation process establishes trustworthy labels and thresholds.
 The command evaluates recorded judge outputs and never calls a paid provider.
+
+`--candidate A1` is the raw-source ablation for **fixed-package Reader** tasks:
+it uses the same reading boundary and lexical retrieval as A0, but strips chapter
+analysis, related concepts, argument flow and reflection expected points before
+invoking the same answering adapter. The current A0 `ask` path already excludes
+those fields, so A0/A1 ask inputs are effectively equivalent; the name alone is
+not a distinct architecture. Reflection uses the same package checkpoint question
+as the task, without its compiled answer. Independent A1 checkpoint generation
+and a full cold-compile comparison remain unimplemented.
+
+`compare` requires matching inputs, gold, scorer, answering adapter, repeat count,
+execution mode and judge versions. It checks artifact hashes, retains all paired
+attempts and reports unknowns separately from regressions/improvements. Reports
+remain descriptive and inconclusive with offline evidence; they do not select a
+winner from missing semantic judgments. Changed judges require both runs to be
+rescored first. Comparison outputs stay private.
 
 `export` writes `export-summary.json` inside the private run directory using an
 explicit aggregate-field allowlist. It excludes case/book identities, paths,

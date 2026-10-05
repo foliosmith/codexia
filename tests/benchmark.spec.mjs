@@ -198,6 +198,45 @@ test('benchmark calibration retains disagreement and missing samples without cla
   expect(bad.stderr).toContain('duplicate calibration');
 });
 
+test('benchmark A1 removes derived answers and compares matched attempts only', async ({}, info) => {
+  test.setTimeout(120000);
+  const suite = info.outputPath('suite');
+  cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+  for (const name of ['cases', 'gold']) {
+    const file = join(suite, `${name}.jsonl`);
+    const row = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse).find(row => (row.id || row.case_id) === 'reflection');
+    writeFileSync(file, JSON.stringify(row) + '\n');
+  }
+  const catalog = join(suite, 'catalog.json');
+  const left = join(suite, 'a0');
+  const right = join(suite, 'a1');
+  for (const [candidate, run] of [['A0', left], ['A1', right]]) expect(invoke('run', '--catalog', catalog, '--candidate', candidate, '--output', run).status).toBe(0);
+  const a0 = JSON.parse(readFileSync(join(left, 'attempts/reflection-1/artifact.json'))).calls[0].request;
+  const a1 = JSON.parse(readFileSync(join(right, 'attempts/reflection-1/artifact.json'))).calls[0].request;
+  expect(a0.input.expected_points.length).toBeGreaterThan(0);
+  expect(a1.input.expected_points).toBeUndefined();
+  expect(a1.context.chapter_analysis).toBeNull();
+  expect(a1.context.related_concepts).toEqual([]);
+  expect(a1.context.argument_flow).toEqual([]);
+  expect(a1.context.nearby_blocks.length).toBeGreaterThan(0);
+  expect(invoke('resume', '--catalog', catalog, '--output', right).status).toBe(1);
+  const comparison = info.outputPath('comparison');
+  const args = ['--left', left, '--right', right];
+  const result = invoke('compare', ...args, '--output', comparison);
+  expect(result.status, result.stderr).toBe(0);
+  const report = JSON.parse(readFileSync(join(comparison, 'comparison.json')));
+  expect(report.paired_attempts).toBe(1);
+  expect(report.counts.unassessed).toBe(1);
+  expect(report.conclusion).toBe('inconclusive');
+  const reportPath = join(right, 'report.json');
+  const changed = JSON.parse(readFileSync(reportPath));
+  changed.scorer_hash = 'different';
+  writeFileSync(reportPath, JSON.stringify(changed));
+  const rejected = invoke('compare', ...args, '--output', info.outputPath('bad-comparison'));
+  expect(rejected.status).toBe(1);
+  expect(rejected.stderr).toContain('incomparable scorer_hash');
+});
+
 test('benchmark resumes interrupted evidence without rerunning calls and verifies private EPUB identity', async ({}, info) => {
   test.setTimeout(120000);
   const suite = info.outputPath('suite');

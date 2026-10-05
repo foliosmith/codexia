@@ -12,6 +12,7 @@ import { compile, execute, collectCalls } from './adapters/a0.mjs';
 import { report } from './scoring/score.mjs';
 import { template, validateReviews, preparePackets } from './scoring/review.mjs';
 import { calibration } from './scoring/calibration.mjs';
+import { compare } from './compare.mjs';
 
 process.umask(0o077);
 const controller = new AbortController();
@@ -40,13 +41,16 @@ try {
     catalog: { type: 'string', default: fileURLToPath(new URL('suites/v0.0/catalog.json', import.meta.url)) },
     output: { type: 'string' }, binary: { type: 'string', default: join(root, 'target/debug/codexia') },
     'agent-command': { type: 'string' }, repeat: { type: 'string', default: '1' }, reviews: { type: 'string' }, judgments: { type: 'string' },
+    candidate: { type: 'string', default: 'A0' }, left: { type: 'string' }, right: { type: 'string' },
   }, allowPositionals: true });
   const command = positionals[0];
-  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|export> [--catalog <file>] [--output <private-directory>] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>]');
+  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>]');
+  assert.ok(['A0', 'A1'].includes(values.candidate), 'candidate must be A0 or A1');
   assert.ok(!values.reviews || ['score', 'report', 'export'].includes(command), '--reviews requires score/report/export');
   if (command === 'score') assert.ok(values.reviews, 'score requires --reviews');
   const suite = loadSuite(values.catalog);
-  if (['prepare-calibration', 'calibrate'].includes(command)) console.log(JSON.stringify(calibration(command, values.output, values.judgments)));
+  if (command === 'compare') console.log(JSON.stringify(compare(values.left, values.right, values.output)));
+  else if (['prepare-calibration', 'calibrate'].includes(command)) console.log(JSON.stringify(calibration(command, values.output, values.judgments)));
   else if (command === 'validate') console.log(JSON.stringify({ valid: true, cases: suite.cases.length, books: suite.books.size, fingerprint: suite.fingerprint }));
   else {
     assert.equal(suite.catalog.split, 'dev', 'held-out execution requires verified isolation; unsupported');
@@ -63,10 +67,11 @@ try {
       assert.ok(!existsSync(directory), 'use a fresh output directory');
       mkdirSync(dirname(directory), { recursive: true });
       mkdirSync(directory);
-      manifest = { protocol: '0.0', ...identity, git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), git_diff_hash: hash(execFileSync('git', ['diff', 'HEAD', '--', 'src', 'benchmarks', 'tests/fixtures/analyzer.mjs'], { cwd: root })), evidence: values['agent-command'] ? 'replay' : 'offline', candidate: 'A0', mode: 'fixed-package-reader', compiler: 'offline-registration', node_version: process.version, repeat, started_at: new Date().toISOString(), status: 'running' };
+      manifest = { protocol: '0.0', ...identity, git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), git_diff_hash: hash(execFileSync('git', ['diff', 'HEAD', '--', 'src', 'benchmarks', 'tests/fixtures/analyzer.mjs'], { cwd: root })), evidence: values['agent-command'] ? 'replay' : 'offline', candidate: values.candidate, mode: 'fixed-package-reader', compiler: 'offline-registration', node_version: process.version, repeat, started_at: new Date().toISOString(), status: 'running' };
       save(join(directory, 'manifest.json'), manifest);
     } else {
       manifest = read(join(directory, 'manifest.json'));
+      if (executing) assert.equal(manifest.candidate, values.candidate, 'candidate changed');
       if (executing) for (const [key, value] of Object.entries(identity)) assert.equal(manifest[key], value, `${key} changed; use a new run`);
       else if (manifest.execution_hash) assert.equal(manifest.execution_hash, suite.executionHash, 'execution inputs changed; cannot rescore different questions or sources');
       else assert.equal(manifest.suite_hash, suite.fingerprint, 'legacy run needs its original suite; execution identity unavailable');
@@ -95,7 +100,7 @@ try {
               if (interrupted) artifact = existsSync(join(attempt, 'artifact.json')) ? read(join(attempt, 'artifact.json')) : { status: 'cancelled', error: 'Interrupted attempt retained; start a new run for a fresh attempt.', steps: [], calls: collectCalls(attempt) };
               else if (item.applicability === 'not_applicable') artifact = { status: 'not_applicable', steps: [], calls: [] };
               else {
-                try { artifact = await execute({ item, book, pkg, directory: attempt, binary, agent, signal: controller.signal }); }
+                try { artifact = await execute({ item, book, pkg, directory: attempt, binary, agent, signal: controller.signal, candidate: values.candidate }); }
                 catch (error) { artifact = { status: controller.signal.aborted ? 'cancelled' : 'provider_error', error: error.message, steps: [], calls: [] }; }
               }
               save(join(attempt, 'artifact.json'), artifact);
