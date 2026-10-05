@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { hash, check } from '../data.mjs';
-import { save, privatePath } from '../storage.mjs';
+import { hash, check, root } from '../data.mjs';
+import { save, privatePath, treeHash } from '../storage.mjs';
 import { applyReview } from './review.mjs';
 
 export function score(trial, item, artifact) {
@@ -60,6 +60,7 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
   }
   const result = {
     protocol: '0.0', evidence: manifest.evidence, candidate: manifest.candidate,
+    suite_hash: suite.fingerprint, execution_hash: manifest.execution_hash ?? null, scorer_hash: treeHash(join(root, 'benchmarks/scoring')),
     attempts: trials.length, independent_cases: new Set(trials.map(t => t.case_id)).size,
     independent_books: new Set(trials.map(t => suite.cases.find(c => c.id === t.case_id).book_id)).size,
     expected_attempts: suite.cases.length * manifest.repeat,

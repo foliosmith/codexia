@@ -9,6 +9,9 @@ node benchmarks/runner.mjs run --output private/benchmarks/runs/first
 node benchmarks/runner.mjs resume --output private/benchmarks/runs/first
 node benchmarks/runner.mjs report --output private/benchmarks/runs/first
 node benchmarks/runner.mjs review-template --output private/benchmarks/runs/first
+node benchmarks/runner.mjs prepare-review --output private/benchmarks/runs/first
+node benchmarks/runner.mjs prepare-calibration --output private/benchmarks/calibration/inputs
+node benchmarks/runner.mjs calibrate --judgments <judge-outputs.json> --output private/benchmarks/calibration/result
 node benchmarks/runner.mjs score --output private/benchmarks/runs/first --reviews <completed-review.json>
 node benchmarks/runner.mjs export --output private/benchmarks/runs/first --reviews <completed-review.json>
 ```
@@ -72,6 +75,30 @@ fail. Even complete passing reviews of offline outputs cannot establish online
 model quality. `report` without `--reviews` rebuilds the structural report; prior
 assessments remain under `assessments/`. Changing judge versions requires rescoring
 both candidates, not comparing old and new scores directly.
+
+New runs record execution identity separately from gold. `score`/`report` may
+reevaluate existing answers after gold or scorer updates without calling a
+provider; changed questions, sources and reading boundaries are still rejected.
+Execution resume remains strict, including gold and executable identities. Legacy
+runs lacking execution identity require the original suite. Each report records
+the current suite and scorer hashes. Old archived assessments remain intact.
+
+`prepare-review` writes randomly named private packets and a separate bindings
+file under `review-packets/`. Packets omit candidate/model names, attempt IDs,
+card IDs and filesystem paths; source evidence is clipped to each step's allowed
+Unicode range. Gold may name forbidden unread facts for leakage assessment and
+is explicitly distinguished from allowed evidence. Share packets only with the
+reviewer, never with the candidate; retain the bindings locally. Answer prose
+can still hint at identity, so this is metadata blinding, not perfect anonymity.
+
+Twenty original public calibration outputs cover correct paraphrases, omitted
+conditions, false attribution, uncertainty, cross-chapter counterexamples,
+refusal, empty answers, wrong reflections, injection and a Chinese boundary.
+`prepare-calibration` separates judge inputs from expected labels. `calibrate`
+checks input identity, duplicates, evidence, agreement and missing samples.
+These model-authored labels remain draft: `calibrated` is always false until a
+separate human validation process establishes trustworthy labels and thresholds.
+The command evaluates recorded judge outputs and never calls a paid provider.
 
 `export` writes `export-summary.json` inside the private run directory using an
 explicit aggregate-field allowlist. It excludes case/book identities, paths,

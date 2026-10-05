@@ -10,7 +10,8 @@ import { loadSuite, root, hash, read } from './data.mjs';
 import { privatePath, save, treeHash, acquireLock } from './storage.mjs';
 import { compile, execute, collectCalls } from './adapters/a0.mjs';
 import { report } from './scoring/score.mjs';
-import { template, validateReviews } from './scoring/review.mjs';
+import { template, validateReviews, preparePackets } from './scoring/review.mjs';
+import { calibration } from './scoring/calibration.mjs';
 
 process.umask(0o077);
 const controller = new AbortController();
@@ -38,14 +39,15 @@ try {
   const { values, positionals } = parseArgs({ options: {
     catalog: { type: 'string', default: fileURLToPath(new URL('suites/v0.0/catalog.json', import.meta.url)) },
     output: { type: 'string' }, binary: { type: 'string', default: join(root, 'target/debug/codexia') },
-    'agent-command': { type: 'string' }, repeat: { type: 'string', default: '1' }, reviews: { type: 'string' },
+    'agent-command': { type: 'string' }, repeat: { type: 'string', default: '1' }, reviews: { type: 'string' }, judgments: { type: 'string' },
   }, allowPositionals: true });
   const command = positionals[0];
-  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|export> [--catalog <file>] [--output <private-directory>] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>]');
+  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|export> [--catalog <file>] [--output <private-directory>] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>]');
   assert.ok(!values.reviews || ['score', 'report', 'export'].includes(command), '--reviews requires score/report/export');
   if (command === 'score') assert.ok(values.reviews, 'score requires --reviews');
   const suite = loadSuite(values.catalog);
-  if (command === 'validate') console.log(JSON.stringify({ valid: true, cases: suite.cases.length, books: suite.books.size, fingerprint: suite.fingerprint }));
+  if (['prepare-calibration', 'calibrate'].includes(command)) console.log(JSON.stringify(calibration(command, values.output, values.judgments)));
+  else if (command === 'validate') console.log(JSON.stringify({ valid: true, cases: suite.cases.length, books: suite.books.size, fingerprint: suite.fingerprint }));
   else {
     assert.equal(suite.catalog.split, 'dev', 'held-out execution requires verified isolation; unsupported');
     const repeat = Number(values.repeat);
@@ -54,7 +56,8 @@ try {
     const directory = privatePath(values.output || join(root, 'private/benchmarks/runs', randomUUID()));
     const binary = resolve(values.binary);
     const agent = resolve(values['agent-command'] || join(root, 'benchmarks/adapters/extract.mjs'));
-    const identity = { suite_hash: suite.fingerprint, binary_hash: hash(readFileSync(binary)), agent_hash: hash(readFileSync(agent)), benchmark_hash: treeHash(join(root, 'benchmarks')), registration_analyzer_hash: hash(readFileSync(join(root, 'tests/fixtures/analyzer.mjs'))) };
+    const executing = ['run', 'resume'].includes(command);
+    const identity = executing ? { suite_hash: suite.fingerprint, execution_hash: suite.executionHash, binary_hash: hash(readFileSync(binary)), agent_hash: hash(readFileSync(agent)), benchmark_hash: treeHash(join(root, 'benchmarks')), registration_analyzer_hash: hash(readFileSync(join(root, 'tests/fixtures/analyzer.mjs'))) } : null;
     let manifest;
     if (command === 'run') {
       assert.ok(!existsSync(directory), 'use a fresh output directory');
@@ -64,7 +67,9 @@ try {
       save(join(directory, 'manifest.json'), manifest);
     } else {
       manifest = read(join(directory, 'manifest.json'));
-      for (const [key, value] of Object.entries(identity)) assert.equal(manifest[key], value, `${key} changed; use a new run`);
+      if (executing) for (const [key, value] of Object.entries(identity)) assert.equal(manifest[key], value, `${key} changed; use a new run`);
+      else if (manifest.execution_hash) assert.equal(manifest.execution_hash, suite.executionHash, 'execution inputs changed; cannot rescore different questions or sources');
+      else assert.equal(manifest.suite_hash, suite.fingerprint, 'legacy run needs its original suite; execution identity unavailable');
       assert.equal(manifest.repeat, repeat, 'repeat changed');
     }
     let release;
@@ -104,6 +109,11 @@ try {
         save(join(directory, 'manifest.json'), manifest);
       }
       const result = summarize(directory, manifest, suite, values.reviews);
+      let reviewPackets;
+      if (command === 'prepare-review') {
+        const trials = readFileSync(join(directory, 'trials.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+        reviewPackets = preparePackets(directory, trials, suite);
+      }
       if (command === 'review-template') {
         const target = join(directory, 'review-template.json');
         assert.ok(!existsSync(target), 'review template already exists; do not overwrite review work');
@@ -113,7 +123,7 @@ try {
       if (command === 'export') {
         save(join(directory, 'export-summary.json'), { protocol: result.protocol, evidence: result.evidence, quality: result.quality, attempts: result.attempts, independent_cases: result.independent_cases, independent_books: result.independent_books, execution: result.execution, structural_passes: result.structural_passes, hard_failures: result.hard_failures, semantic_evaluated: result.semantic_evaluated, task_successes: result.task_successes, usage_coverage: result.usage_coverage });
       }
-      console.log(JSON.stringify({ output: directory, attempts: result.attempts, quality: result.quality, evidence: result.evidence }));
+      console.log(JSON.stringify({ output: directory, attempts: result.attempts, quality: result.quality, evidence: result.evidence, review_packets: reviewPackets }));
       if (result.quality === 'fail' || controller.signal.aborted) process.exitCode = 1;
     } catch (error) {
       if (release && ['run', 'resume'].includes(command)) {

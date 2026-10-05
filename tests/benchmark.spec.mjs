@@ -138,6 +138,64 @@ test('benchmark binds reviews to artifacts and exports only aggregate fields', a
   expect(exported).not.toContain('attempts/');
   expect(exported).not.toContain('reviewer');
   expect(JSON.parse(exported).hard_failures).toBe(1);
+  gold.required_points.push('A revised annotation requires a fresh review, not a new provider call.');
+  writeFileSync(goldFile, JSON.stringify(gold) + '\n');
+  const oldGold = invoke('score', ...args, '--reviews', reviewFile);
+  expect(oldGold.status).toBe(1);
+  expect(oldGold.stderr).toContain('stale gold');
+  review.gold_hash = createHash('sha256').update(JSON.stringify(gold)).digest('hex');
+  writeFileSync(reviewFile, JSON.stringify(reviews));
+  expect(invoke('score', ...args, '--reviews', reviewFile).stderr).not.toContain('changed; use a new run');
+  expect(invoke('resume', ...args).status).toBe(1);
+});
+
+test('benchmark prepares blinded review packets containing only allowed source ranges', async ({}, info) => {
+  const suite = info.outputPath('suite');
+  cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+  for (const name of ['cases', 'gold']) {
+    const file = join(suite, `${name}.jsonl`);
+    const rows = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+    writeFileSync(file, JSON.stringify(rows.find(row => (row.id || row.case_id) === 'partial-read')) + '\n');
+  }
+  const run = join(suite, 'run');
+  const args = ['--catalog', join(suite, 'catalog.json'), '--output', run];
+  expect(invoke('run', ...args).status).toBe(0);
+  const prepared = invoke('prepare-review', ...args);
+  expect(prepared.status, prepared.stderr).toBe(0);
+  const directory = JSON.parse(prepared.stdout).review_packets;
+  const binding = JSON.parse(readFileSync(join(directory, 'bindings.json')));
+  const packet = JSON.parse(readFileSync(join(directory, `${binding[0].packet_id}.json`)));
+  expect(JSON.stringify(packet.steps[0].evidence)).not.toContain('NIGHTJAR');
+  expect(JSON.stringify(packet.steps[0].evidence)).toContain('The sealed result is pending');
+  expect(packet.gold.forbidden_conclusions).toContain('NIGHTJAR');
+  expect(packet.candidate).toBeUndefined();
+  expect(packet.attempt_id).toBeUndefined();
+  expect(packet.steps[0].answer.cards[0].card_id).toBeUndefined();
+  expect(binding[0].artifact_hash).toHaveLength(64);
+});
+
+test('benchmark calibration retains disagreement and missing samples without claiming validation', async ({}, info) => {
+  const prepared = info.outputPath('prepared');
+  expect(invoke('prepare-calibration', '--output', prepared).status).toBe(0);
+  const inputs = JSON.parse(readFileSync(join(prepared, 'inputs.json')));
+  expect(inputs.samples).toHaveLength(20);
+  expect(inputs.samples[0].expectation).toBeUndefined();
+  const judgments = JSON.parse(readFileSync(join(prepared, 'judgments-template.json')));
+  judgments.judge_version = 'synthetic-input-contract';
+  judgments.judgments = ['c01', 'c02'].map(id => ({ id, score: 3, verdict: 'supports', evidence: 'Synthetic judgment for calibration accounting.', hard_failure: false }));
+  const path = join(prepared, 'judgments.json');
+  writeFileSync(path, JSON.stringify(judgments));
+  const output = info.outputPath('scored');
+  expect(invoke('calibrate', '--output', output, '--judgments', path).status).toBe(0);
+  const report = JSON.parse(readFileSync(join(output, 'report.json')));
+  expect(report.matches).toBe(1);
+  expect(report.missing_samples).toBe(18);
+  expect(report.calibrated).toBe(false);
+  judgments.judgments.push(judgments.judgments[0]);
+  writeFileSync(path, JSON.stringify(judgments));
+  const bad = invoke('calibrate', '--output', info.outputPath('duplicate'), '--judgments', path);
+  expect(bad.status).toBe(1);
+  expect(bad.stderr).toContain('duplicate calibration');
 });
 
 test('benchmark resumes interrupted evidence without rerunning calls and verifies private EPUB identity', async ({}, info) => {

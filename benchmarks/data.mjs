@@ -103,5 +103,5 @@ export function loadSuite(path) {
   }
   assert.equal(gold.size, cases.length, 'missing gold');
   const fingerprints = files.map(file => hash(readFileSync(file)));
-  return { catalog, cases, gold, books, fingerprint: hash(JSON.stringify(fingerprints)) };
+  return { catalog, cases, gold, books, fingerprint: hash(JSON.stringify(fingerprints)), executionHash: hash(JSON.stringify(fingerprints.filter((_, i) => i !== 2))) };
 }
