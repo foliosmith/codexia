@@ -8,22 +8,28 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { root, read, hash } from '../data.mjs';
 import { save, treeHash, treeBytes } from '../storage.mjs';
 
-export function compile(book, directory, binary) {
+export function compile(book, directory, binary, timeoutMs = 120000) {
+  const deadline = performance.now() + timeoutMs;
+  const remaining = () => {
+    const value = Math.floor(deadline - performance.now());
+    if (value <= 0) throw Object.assign(new Error('compile timeout'), { code: 'ETIMEDOUT' });
+    return value;
+  };
   mkdirSync(directory, { recursive: true });
   const epub = join(directory, 'source.epub');
   if (!existsSync(epub)) {
     if (book.epub) copyFileSync(book.epub, epub);
-    else execFileSync('python3', [join(root, 'benchmarks/adapters/build-fixture.py'), book.source, epub], { timeout: 10000 });
+    else execFileSync('python3', [join(root, 'benchmarks/adapters/build-fixture.py'), book.source, epub], { timeout: Math.min(10000, remaining()) });
     save(join(directory, 'source-identity.json'), { sha256: hash(readFileSync(epub)) });
   }
   assert.equal(hash(readFileSync(epub)), read(join(directory, 'source-identity.json')).sha256, 'compile source changed');
   const pkg = join(directory, 'package');
   const start = performance.now();
-  const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', join(root, 'tests/fixtures/analyzer.mjs'), '--analysis-jobs', '1'], { timeout: 120000, env: { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '' } });
-  execFileSync(binary, ['validate', pkg], { timeout: 10000 });
+  const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', join(root, 'tests/fixtures/analyzer.mjs'), '--analysis-jobs', '1'], { timeout: remaining(), env: { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '' } });
+  execFileSync(binary, ['validate', pkg], { timeout: Math.min(10000, remaining()) });
   const analysisFiles = ['book_map.json', 'concepts.json', 'claims.json', 'entities.json', 'checkpoints.json', 'recall_cards.json'];
   const analysisBytes = treeBytes(join(pkg, 'chapters')) + analysisFiles.filter(name => existsSync(join(pkg, name))).reduce((sum, name) => sum + statSync(join(pkg, name)).size, 0);
-  save(join(directory, 'compile.json'), { mode: 'offline-registration', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
+  save(join(directory, 'compile.json'), { mode: 'offline-registration', status: 'completed', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
   return pkg;
 }
 

@@ -164,6 +164,9 @@ includes that compilation in its wall time. Resume requires the original mode;
 finished attempts are not recompiled, and an interrupted cold attempt remains a
 failure rather than being relabelled a warm success. Warm-cache experiments are
 not implemented. Both modes still use the offline registration compiler adapter.
+In cold mode, the case's `timeout_ms` covers source preparation, compilation,
+validation and Reader execution together. A compile timeout remains a failed
+attempt with a compilation record and no claimed Reader result.
 
 Reports deduplicate shared compilation records, separate Reader and compile
 times, and record original EPUB bytes, full package bytes and analysis bytes.

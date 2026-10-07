@@ -75,6 +75,30 @@ test('benchmark corpus audit rejects renamed copies across development and holdo
   expect(invoke('run', '--catalog', catalogFile, '--output', info.outputPath('must-not-run')).status).toBe(1);
 });
 
+test('cold benchmark deadline includes compilation and retains its failure', async ({}, info) => {
+  const suite = info.outputPath('suite');
+  cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+  const item = JSON.parse(readFileSync(join(suite, 'cases.jsonl'), 'utf8').split('\n')[0]);
+  item.budget.timeout_ms = 800;
+  writeFileSync(join(suite, 'cases.jsonl'), JSON.stringify(item) + '\n');
+  writeFileSync(join(suite, 'gold.jsonl'), readFileSync(join(suite, 'gold.jsonl'), 'utf8').split('\n')[0] + '\n');
+  const binary = join(suite, 'slow-compiler.mjs');
+  writeFileSync(binary, '#!/usr/bin/env node\nimport {writeFileSync} from "node:fs";writeFileSync(process.argv[process.argv.indexOf("--out")+1]+".started","started");setTimeout(()=>process.exit(1),1800);\n', { mode: 0o755 });
+  const run = join(suite, 'run');
+  const result = invoke('run', '--catalog', join(suite, 'catalog.json'), '--mode', 'cold-compile-reader', '--binary', binary, '--output', run);
+  expect(result.status).toBe(1);
+  expect(existsSync(join(run, 'attempts/citation-1/compilation/package.started'))).toBe(true);
+  const trial = JSON.parse(readFileSync(join(run, 'trials.jsonl'), 'utf8'));
+  expect(trial.status).toBe('timed_out');
+  expect(trial.call_count).toBe(0);
+  const artifact = JSON.parse(readFileSync(join(run, trial.artifact)));
+  expect(artifact.compilation.status).toBe('failed');
+  expect(artifact.timing.reader_ms).toBeNull();
+  const report = JSON.parse(readFileSync(join(run, 'report.json')));
+  expect(report.compilations).toHaveLength(1);
+  expect(report.reader_timings[0].first_result_ms).toBeNull();
+});
+
 test('benchmark validates source identity and rejects ambiguous or missing contracts', async ({}, info) => {
   const valid = invoke('validate');
   expect(valid.status, valid.stderr).toBe(0);

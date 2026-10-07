@@ -118,15 +118,20 @@ try {
               else if (item.applicability === 'not_applicable') artifact = { status: 'not_applicable', steps: [], calls: [] };
               else {
                 const compilation = manifest.mode === 'cold-compile-reader' ? join(attempt, 'compilation') : sharedCompilation;
+                let compilationData;
                 try {
-                  if (manifest.mode === 'cold-compile-reader') compile(book, compilation, binary);
+                  if (manifest.mode === 'cold-compile-reader') compile(book, compilation, binary, item.budget.timeout_ms);
+                  compilationData = read(join(compilation, 'compile.json'));
+                  const remaining = manifest.mode === 'cold-compile-reader' ? Math.floor(item.budget.timeout_ms - (performance.now() - started)) : item.budget.timeout_ms;
+                  if (remaining <= 0) throw Object.assign(new Error('attempt timeout'), { code: 'ETIMEDOUT' });
                   const readerStarted = performance.now();
-                  artifact = await execute({ item, book, pkg: join(compilation, 'package'), directory: attempt, binary, agent, signal: controller.signal, candidate: values.candidate });
+                  artifact = await execute({ item: { ...item, budget: { ...item.budget, timeout_ms: remaining } }, book, pkg: join(compilation, 'package'), directory: attempt, binary, agent, signal: controller.signal, candidate: values.candidate });
                   artifact.timing = { reader_ms: Math.round(performance.now() - readerStarted) };
-                  const data = read(join(compilation, 'compile.json'));
-                  artifact.compilation = { ...data, id: manifest.mode === 'cold-compile-reader' ? id : book.id };
                 }
-                catch (error) { artifact = { status: controller.signal.aborted ? 'cancelled' : 'provider_error', error: error.message, steps: [], calls: [] }; }
+                catch (error) {
+                  artifact = { status: controller.signal.aborted ? 'cancelled' : error.code === 'ETIMEDOUT' ? 'timed_out' : 'provider_error', error: error.message, steps: [], calls: collectCalls(attempt), timing: { reader_ms: null } };
+                }
+                artifact.compilation = { ...(compilationData || { mode: 'offline-registration', status: 'failed', duration_ms: Math.round(performance.now() - started), source_bytes: null, package_bytes: null, analysis_bytes: null, usage: null, estimated_usd: null }), id: manifest.mode === 'cold-compile-reader' ? id : book.id };
               }
               save(join(attempt, 'artifact.json'), artifact);
               const trial = { protocol: '0.0', attempt_id: id, case_id: item.id, status: artifact.status, duration_ms: Math.round(performance.now() - started), artifact: `attempts/${id}/artifact.json`, artifact_hash: hash(readFileSync(join(attempt, 'artifact.json'))), call_count: artifact.calls.length, known_usage_calls: artifact.calls.filter(c => c.usage !== null).length };
