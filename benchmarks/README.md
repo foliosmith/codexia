@@ -6,6 +6,7 @@ Run from any directory with Node.js 22 or later:
 node benchmarks/runner.mjs validate
 node benchmarks/runner.mjs validate --catalog <local-catalog.json>
 node benchmarks/runner.mjs run --output private/benchmarks/runs/first
+node benchmarks/runner.mjs run --mode cold-compile-reader --output private/benchmarks/runs/cold
 node benchmarks/runner.mjs run --candidate A1 --output private/benchmarks/runs/raw-source
 node benchmarks/runner.mjs compare --left private/benchmarks/runs/first --right private/benchmarks/runs/raw-source --output private/benchmarks/comparisons/first
 node benchmarks/runner.mjs resume --output private/benchmarks/runs/first
@@ -145,3 +146,28 @@ For the focused no-provider regression suite, build the local binary and run
 `npm --prefix tests run benchmark`. The suite uses original fixtures, exercises
 the real Reader, and retains evidence under `private/acceptance/benchmarks/`.
 This is a runnable developer gate, not an installed PR/release automation.
+
+Execution modes are explicit. The default `fixed-package-reader` compiles one
+registration package per book and shares it across isolated Reader attempts.
+`cold-compile-reader` creates a fresh package for every applicable attempt and
+includes that compilation in its wall time. Resume requires the original mode;
+finished attempts are not recompiled, and an interrupted cold attempt remains a
+failure rather than being relabelled a warm success. Warm-cache experiments are
+not implemented. Both modes still use the offline registration compiler adapter.
+
+Reports deduplicate shared compilation records, separate Reader and compile
+times, and record original EPUB bytes, full package bytes and analysis bytes.
+Analysis bytes are chapter analyses plus book map/concepts/claims/entities/
+checkpoints/recall cards; the full package also retains source and validation
+data. Byte counts are not token estimates. `first_result_ms` is the sum of
+compilation and Reader completion, not time to a semantically verified answer
+or a streaming first token. Comparisons reject different execution modes.
+
+New run manifests give content captures a seven-day retention deadline. After
+review, retain only a checked aggregate export outside the run directory and
+remove the complete run directory (including packages, requests, answers,
+review packets and traces). This is a manual retention policy, not an automatic
+deletion job; no existing files are removed by a benchmark command. Restricted
+source libraries and human gold have their own separately agreed retention and
+rights. Use public original fixtures for long-lived replay, and never enable
+these full captures for participant sessions.

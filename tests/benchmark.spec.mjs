@@ -8,6 +8,47 @@ import { resolve, join } from 'node:path';
 const runner = resolve('benchmarks/runner.mjs');
 const invoke = (...args) => spawnSync(process.execPath, [runner, ...args], { encoding: 'utf8', timeout: 120000 });
 
+test('benchmark separates cold compilation from shared-package Reader timing', async ({}, info) => {
+  test.setTimeout(120000);
+  const suite = info.outputPath('suite');
+  cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+  for (const name of ['cases', 'gold']) {
+    const file = join(suite, `${name}.jsonl`);
+    writeFileSync(file, readFileSync(file, 'utf8').split('\n')[0] + '\n');
+  }
+  const catalog = join(suite, 'catalog.json');
+  for (const mode of ['fixed-package-reader', 'cold-compile-reader']) {
+    const run = join(suite, mode);
+    const args = ['--catalog', catalog, '--output', run, '--mode', mode, '--repeat', '2'];
+    const result = invoke('run', ...args);
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(readFileSync(join(run, 'report.json')));
+    expect(report.compilations).toHaveLength(mode === 'fixed-package-reader' ? 1 : 2);
+    expect(report.reader_timings).toHaveLength(2);
+    for (const timing of report.reader_timings) {
+      expect(timing.first_result_ms).toBeGreaterThanOrEqual(timing.reader_ms);
+      expect(timing.first_result_ms).toBeGreaterThanOrEqual(timing.compile_ms);
+    }
+    for (const compilation of report.compilations) {
+      expect(compilation.source_bytes).toBeGreaterThan(0);
+      expect(compilation.package_bytes).toBeGreaterThan(compilation.analysis_bytes);
+      expect(compilation.analysis_bytes).toBeGreaterThan(0);
+    }
+    const manifest = JSON.parse(readFileSync(join(run, 'manifest.json')));
+    expect(Date.parse(manifest.retention.content_expires_at) - Date.parse(manifest.started_at)).toBe(7 * 86400000);
+    const original = readFileSync(join(run, 'trials.jsonl'), 'utf8');
+    expect(invoke('resume', ...args).status).toBe(0);
+    expect(readFileSync(join(run, 'trials.jsonl'), 'utf8')).toBe(original);
+    if (mode === 'cold-compile-reader') {
+      expect(invoke('resume', '--catalog', catalog, '--output', run, '--repeat', '2').status).toBe(1);
+      for (const id of ['citation-1', 'citation-2']) expect(JSON.parse(readFileSync(join(run, 'attempts', id, 'compilation/package/compile_status.json'))).attempt).toBe(1);
+    }
+  }
+  const compared = invoke('compare', '--left', join(suite, 'fixed-package-reader'), '--right', join(suite, 'cold-compile-reader'), '--output', info.outputPath('bad-compare'));
+  expect(compared.status).toBe(1);
+  expect(compared.stderr).toContain('incomparable mode');
+});
+
 test('benchmark validates source identity and rejects ambiguous or missing contracts', async ({}, info) => {
   const valid = invoke('validate');
   expect(valid.status, valid.stderr).toBe(0);

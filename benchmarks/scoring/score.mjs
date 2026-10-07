@@ -30,6 +30,8 @@ export function score(trial, item, artifact) {
 export function report(directory, manifest, suite, trials, reviews = new Map()) {
   const retrieval = [];
   const packageEvaluations = {};
+  const compilations = new Map();
+  const readerTimings = [];
   const scores = trials.map(trial => {
     check('trial', trial);
     if (trial.artifact !== `attempts/${trial.attempt_id}/artifact.json`) throw new Error('invalid artifact path');
@@ -38,6 +40,10 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     const item = suite.cases.find(item => item.id === trial.case_id);
     if (!item) throw new Error('unknown trial case');
     const artifact = JSON.parse(bytes);
+    if (artifact.compilation) {
+      compilations.set(artifact.compilation.id, artifact.compilation);
+      readerTimings.push({ attempt_id: trial.attempt_id, reader_ms: artifact.timing.reader_ms, compile_ms: artifact.compilation.duration_ms, first_result_ms: trial.status === 'completed' ? artifact.compilation.duration_ms + artifact.timing.reader_ms : null, basis: 'Compile plus Reader completion; first completed result, not semantic correctness or streaming first token.' });
+    }
     if (artifact.package_eval) packageEvaluations[item.book_id] = artifact.package_eval;
     const gold = suite.gold.get(item.id);
     const offered = artifact.calls.flatMap(call => call.request?.evidence_refs || []);
@@ -87,6 +93,7 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     duration_ms: trials.map(t => t.duration_ms),
     dimensions: group(c => c.dimensions), books: group(c => [c.book_id]), languages: group(c => [suite.books.get(c.book_id).language]), tasks: group(c => c.steps.map(s => s.task)), suites: group(c => [c.suite]),
     package_evaluations: packageEvaluations, retrieval,
+    mode: manifest.mode, compilations: [...compilations.values()], reader_timings: readerTimings,
     limitations: ['Draft gold is not independent human review.', 'Offline registration compilation and source extraction do not establish model quality even when sample reviews pass.', 'Held-out process isolation and online budget enforcement are not implemented.'],
     scores,
   };

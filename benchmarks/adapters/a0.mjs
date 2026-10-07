@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, readdirSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, copyFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { root, read, hash } from '../data.mjs';
-import { save, treeHash } from '../storage.mjs';
+import { save, treeHash, treeBytes } from '../storage.mjs';
 
 export function compile(book, directory, binary) {
   mkdirSync(directory, { recursive: true });
@@ -21,7 +21,9 @@ export function compile(book, directory, binary) {
   const start = performance.now();
   const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', join(root, 'tests/fixtures/analyzer.mjs'), '--analysis-jobs', '1'], { timeout: 120000, env: { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '' } });
   execFileSync(binary, ['validate', pkg], { timeout: 10000 });
-  save(join(directory, 'compile.json'), { mode: 'offline-registration', duration_ms: Math.round(performance.now() - start), usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
+  const analysisFiles = ['book_map.json', 'concepts.json', 'claims.json', 'entities.json', 'checkpoints.json', 'recall_cards.json'];
+  const analysisBytes = treeBytes(join(pkg, 'chapters')) + analysisFiles.filter(name => existsSync(join(pkg, name))).reduce((sum, name) => sum + statSync(join(pkg, name)).size, 0);
+  save(join(directory, 'compile.json'), { mode: 'offline-registration', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
   return pkg;
 }
 

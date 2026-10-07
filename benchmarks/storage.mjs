@@ -40,6 +40,14 @@ export function treeHash(directory) {
   return hash(JSON.stringify(files));
 }
 
+export function treeBytes(directory) {
+  return readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => {
+    const path = join(directory, entry.name);
+    assert.ok(!entry.isSymbolicLink(), 'symlink in measured artifacts');
+    return total + (entry.isDirectory() ? treeBytes(path) : lstatSync(path).size);
+  }, 0);
+}
+
 export function acquireLock(directory, recover) {
   const path = privatePath(join(directory, '.lock'));
   let recovery;
