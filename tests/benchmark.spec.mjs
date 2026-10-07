@@ -269,6 +269,39 @@ test('benchmark calibration retains disagreement and missing samples without cla
   expect(bad.stderr).toContain('duplicate calibration');
 });
 
+test('benchmark calibration admission requires every reference reviewed and every judgment matching', async ({}, info) => {
+  const reference = JSON.parse(readFileSync('benchmarks/suites/v0.0/calibration/samples.json'));
+  const refFile = info.outputPath('reference.json');
+  mkdirSync(info.outputPath(''), { recursive: true });
+  reference.status = 'reviewed';
+  reference.reviewer = 'Synthetic contract fixture, not an actual human corpus review';
+  const judgmentsFile = info.outputPath('judgments.json');
+  const judgments = { judge_version: 'synthetic-contract-1', judgments: reference.samples.map(s => ({ id: s.id, score: s.expectation.score, verdict: s.expectation.verdict, hard_failure: s.expectation.hard_failure, evidence: 'Synthetic prediction used only to test admission policy.' })) };
+  function writeInputs() {
+    writeFileSync(refFile, JSON.stringify(reference));
+    judgments.calibration_hash = createHash('sha256').update(readFileSync(refFile)).digest('hex');
+    writeFileSync(judgmentsFile, JSON.stringify(judgments));
+  }
+  writeInputs();
+  const args = ['--calibration', refFile, '--judgments', judgmentsFile];
+  const draft = info.outputPath('draft-expectations');
+  expect(invoke('calibrate', ...args, '--output', draft).status).toBe(0);
+  expect(JSON.parse(readFileSync(join(draft, 'report.json'))).calibrated).toBe(false);
+  for (const sample of reference.samples) sample.expectation.status = 'reviewed';
+  writeInputs();
+  const accepted = info.outputPath('accepted');
+  expect(invoke('calibrate', ...args, '--output', accepted).status).toBe(0);
+  expect(JSON.parse(readFileSync(join(accepted, 'report.json'))).calibrated).toBe(true);
+  judgments.judgments[1].hard_failure = false;
+  writeInputs();
+  const rejected = info.outputPath('missed-hard-failure');
+  expect(invoke('calibrate', ...args, '--output', rejected).status).toBe(1);
+  expect(JSON.parse(readFileSync(join(rejected, 'report.json'))).calibrated).toBe(false);
+  delete reference.reviewer;
+  writeInputs();
+  expect(invoke('calibrate', ...args, '--output', info.outputPath('unattributed')).status).toBe(1);
+});
+
 test('benchmark A1 removes derived answers and compares matched attempts only', async ({}, info) => {
   test.setTimeout(120000);
   const suite = info.outputPath('suite');

@@ -45,9 +45,10 @@ try {
     candidate: { type: 'string', default: 'A0' }, left: { type: 'string' }, right: { type: 'string' },
     mode: { type: 'string', default: 'fixed-package-reader' },
     holdout: { type: 'string' },
+    calibration: { type: 'string' },
   }, allowPositionals: true });
   const command = positionals[0];
-  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>]');
+  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>] [--calibration <reference.json>]');
   assert.ok(['A0', 'A1'].includes(values.candidate), 'candidate must be A0 or A1');
   assert.ok(['fixed-package-reader', 'cold-compile-reader'].includes(values.mode), 'mode must be fixed-package-reader or cold-compile-reader');
   assert.ok(!values.reviews || ['score', 'report', 'export'].includes(command), '--reviews requires score/report/export');
@@ -59,7 +60,11 @@ try {
     if (audit.conflicts.length) process.exitCode = 1;
   }
   else if (command === 'compare') console.log(JSON.stringify(compare(values.left, values.right, values.output)));
-  else if (['prepare-calibration', 'calibrate'].includes(command)) console.log(JSON.stringify(calibration(command, values.output, values.judgments)));
+  else if (['prepare-calibration', 'calibrate'].includes(command)) {
+    const result = calibration(command, values.output, values.judgments, values.calibration);
+    console.log(JSON.stringify(result));
+    if (result.state === 'evaluated' && !result.calibrated) process.exitCode = 1;
+  }
   else if (command === 'validate') console.log(JSON.stringify({ valid: true, cases: suite.cases.length, books: suite.books.size, fingerprint: suite.fingerprint }));
   else {
     assert.equal(suite.catalog.split, 'dev', 'held-out execution requires verified isolation; unsupported');

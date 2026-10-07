@@ -100,9 +100,18 @@ conditions, false attribution, uncertainty, cross-chapter counterexamples,
 refusal, empty answers, wrong reflections, injection and a Chinese boundary.
 `prepare-calibration` separates judge inputs from expected labels. `calibrate`
 checks input identity, duplicates, evidence, agreement and missing samples.
-These model-authored labels remain draft: `calibrated` is always false until a
-separate human validation process establishes trustworthy labels and thresholds.
+These model-authored labels remain draft: agreement cannot establish calibration
+without an attributed human review of every reference expectation.
 The command evaluates recorded judge outputs and never calls a paid provider.
+
+After actual human review, provide the private reference file through
+`--calibration <reference.json>` to both calibration commands. Mark the dataset
+and each expectation `reviewed`, and record its `reviewer`. The admission gate
+requires at least 20 samples, all judgments present, and exact agreement on each
+score, verdict and hard-failure flag. Any disagreement in a complete reviewed
+set returns nonzero. Passing means agreement on that frozen reference set, not
+universal judge accuracy or proof that the attributed human work occurred.
+The repository's default draft references are never promoted automatically.
 
 `--candidate A1` is the raw-source ablation for **fixed-package Reader** tasks:
 it uses the same reading boundary and lexical retrieval as A0, but strips chapter
