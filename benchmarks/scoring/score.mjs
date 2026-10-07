@@ -83,6 +83,11 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     independent_books: new Set(trials.map(t => suite.cases.find(c => c.id === t.case_id).book_id)).size,
     expected_attempts: suite.cases.length * manifest.repeat,
     missing_attempts: suite.cases.length * manifest.repeat - trials.length,
+    repeated_cases: suite.cases.map(item => {
+      const attempts = scores.filter(s => s.case_id === item.id);
+      const known = attempts.every(s => typeof s.task_success === 'boolean');
+      return { case_id: item.id, planned_attempts: manifest.repeat, recorded_attempts: attempts.length, successes: attempts.filter(s => s.task_success === true).length, all_passed: attempts.length === manifest.repeat && known ? attempts.every(s => s.task_success) : null };
+    }),
     execution, structural_passes: scores.filter(s => s.structural.passed).length,
     hard_failures: scores.filter(s => s.hard_failures.length).length,
     semantic_evaluated: scores.filter(s => s.semantic.state === 'evaluated').length,

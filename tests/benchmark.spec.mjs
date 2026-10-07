@@ -25,6 +25,7 @@ test('benchmark separates cold compilation from shared-package Reader timing', a
     const report = JSON.parse(readFileSync(join(run, 'report.json')));
     expect(report.compilations).toHaveLength(mode === 'fixed-package-reader' ? 1 : 2);
     expect(report.reader_timings).toHaveLength(2);
+    expect(report.repeated_cases[0]).toEqual({ case_id: 'citation', planned_attempts: 2, recorded_attempts: 2, successes: 0, all_passed: null });
     for (const timing of report.reader_timings) {
       expect(timing.first_result_ms).toBeGreaterThanOrEqual(timing.reader_ms);
       expect(timing.first_result_ms).toBeGreaterThanOrEqual(timing.compile_ms);
@@ -47,6 +48,31 @@ test('benchmark separates cold compilation from shared-package Reader timing', a
   const compared = invoke('compare', '--left', join(suite, 'fixed-package-reader'), '--right', join(suite, 'cold-compile-reader'), '--output', info.outputPath('bad-compare'));
   expect(compared.status).toBe(1);
   expect(compared.stderr).toContain('incomparable mode');
+});
+
+test('benchmark corpus audit rejects renamed copies across development and holdout', async ({}, info) => {
+  const sealed = info.outputPath('sealed');
+  cpSync('benchmarks/suites/v0.0', sealed, { recursive: true });
+  const catalogFile = join(sealed, 'catalog.json');
+  const catalog = JSON.parse(readFileSync(catalogFile));
+  catalog.split = 'holdout';
+  writeFileSync(catalogFile, JSON.stringify(catalog));
+  const output = info.outputPath('conflict');
+  const result = invoke('audit-corpus', '--holdout', catalogFile, '--output', output);
+  expect(result.status).toBe(1);
+  const audit = JSON.parse(readFileSync(join(output, 'corpus-audit.json')));
+  expect(audit.conflicts.map(c => c.reason)).toContain('same_source_family');
+  expect(audit.sealed_execution_ready).toBe(false);
+  const bookFile = join(sealed, 'fixtures/river-study.json');
+  const book = JSON.parse(readFileSync(bookFile));
+  book.family = 'renamed-family';
+  writeFileSync(bookFile, JSON.stringify(book));
+  catalog.books[0].sha256 = createHash('sha256').update(readFileSync(bookFile)).digest('hex');
+  writeFileSync(catalogFile, JSON.stringify(catalog));
+  const renamed = info.outputPath('renamed');
+  expect(invoke('audit-corpus', '--holdout', catalogFile, '--output', renamed).status).toBe(1);
+  expect(JSON.parse(readFileSync(join(renamed, 'corpus-audit.json'))).conflicts.map(c => c.reason)).toEqual(['identical_source']);
+  expect(invoke('run', '--catalog', catalogFile, '--output', info.outputPath('must-not-run')).status).toBe(1);
 });
 
 test('benchmark validates source identity and rejects ambiguous or missing contracts', async ({}, info) => {

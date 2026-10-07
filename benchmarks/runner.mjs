@@ -13,6 +13,7 @@ import { report } from './scoring/score.mjs';
 import { template, validateReviews, preparePackets } from './scoring/review.mjs';
 import { calibration } from './scoring/calibration.mjs';
 import { compare } from './compare.mjs';
+import { auditCorpus } from './corpus.mjs';
 
 process.umask(0o077);
 const controller = new AbortController();
@@ -43,15 +44,21 @@ try {
     'agent-command': { type: 'string' }, repeat: { type: 'string', default: '1' }, reviews: { type: 'string' }, judgments: { type: 'string' },
     candidate: { type: 'string', default: 'A0' }, left: { type: 'string' }, right: { type: 'string' },
     mode: { type: 'string', default: 'fixed-package-reader' },
+    holdout: { type: 'string' },
   }, allowPositionals: true });
   const command = positionals[0];
-  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>]');
+  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>]');
   assert.ok(['A0', 'A1'].includes(values.candidate), 'candidate must be A0 or A1');
   assert.ok(['fixed-package-reader', 'cold-compile-reader'].includes(values.mode), 'mode must be fixed-package-reader or cold-compile-reader');
   assert.ok(!values.reviews || ['score', 'report', 'export'].includes(command), '--reviews requires score/report/export');
   if (command === 'score') assert.ok(values.reviews, 'score requires --reviews');
   const suite = loadSuite(values.catalog);
-  if (command === 'compare') console.log(JSON.stringify(compare(values.left, values.right, values.output)));
+  if (command === 'audit-corpus') {
+    const audit = auditCorpus(values.catalog, values.holdout, values.output);
+    console.log(JSON.stringify(audit));
+    if (audit.conflicts.length) process.exitCode = 1;
+  }
+  else if (command === 'compare') console.log(JSON.stringify(compare(values.left, values.right, values.output)));
   else if (['prepare-calibration', 'calibrate'].includes(command)) console.log(JSON.stringify(calibration(command, values.output, values.judgments)));
   else if (command === 'validate') console.log(JSON.stringify({ valid: true, cases: suite.cases.length, books: suite.books.size, fingerprint: suite.fingerprint }));
   else {

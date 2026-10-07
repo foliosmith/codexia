@@ -9,6 +9,7 @@ node benchmarks/runner.mjs run --output private/benchmarks/runs/first
 node benchmarks/runner.mjs run --mode cold-compile-reader --output private/benchmarks/runs/cold
 node benchmarks/runner.mjs run --candidate A1 --output private/benchmarks/runs/raw-source
 node benchmarks/runner.mjs compare --left private/benchmarks/runs/first --right private/benchmarks/runs/raw-source --output private/benchmarks/comparisons/first
+node benchmarks/runner.mjs audit-corpus --catalog <dev-catalog.json> --holdout <holdout-catalog.json> --output private/benchmarks/corpus-audit
 node benchmarks/runner.mjs resume --output private/benchmarks/runs/first
 node benchmarks/runner.mjs report --output private/benchmarks/runs/first
 node benchmarks/runner.mjs review-template --output private/benchmarks/runs/first
@@ -171,3 +172,15 @@ deletion job; no existing files are removed by a benchmark command. Restricted
 source libraries and human gold have their own separately agreed retention and
 rights. Use public original fixtures for long-lived replay, and never enable
 these full captures for participant sessions.
+
+`audit-corpus` reports question counts, language/book/family distribution,
+regression/capability counts, dimension coverage and reviewed-gold counts. The
+optional holdout catalog is checked against declared families and identical EPUB
+bytes (or identical controlled source text). Conflicts return nonzero and retain
+the audit report. Undeclared translations or rewrites still need provenance
+review. This command does not run candidates or establish process isolation;
+held-out execution remains disabled even for a valid split.
+
+`repeated_cases` records every planned and completed attempt per question and the
+number of successes. `all_passed` remains null until every planned attempt has
+a known outcome; there is no best-of-N success selection.
