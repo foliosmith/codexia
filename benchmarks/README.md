@@ -205,7 +205,7 @@ This replaces `--agent-command`, enables the configured model through the existi
 JSON stdin/stdout adapter, and freezes the model, adapter hash, limits and pricing.
 Reader answering uses this configuration; compilation is offline registration
 unless `--compile-with-provider` is also supplied. Automatic calibration judging requires the explicit `judge-calibration` command;
-automatic candidate semantic scoring is not implemented. No online call is
+candidate scoring uses `judge` after calibration admission. No online call is
 made by default, validation, report generation or corpus auditing.
 
 For a config at that path, this is a template, not usable pricing. Replace all
@@ -314,5 +314,39 @@ dispatch. Token/money thresholds remain post-usage checks, not hard spending cap
 A completed invocation is not a calibration pass. The existing admission rule
 still requires at least 20 independently reviewed references, all judgments, and
 exact agreement. Default references are drafts, so simulated or real generated
-judgments cannot mark them reviewed. This command implements calibration judging;
-automatic semantic scoring of candidate runs remains separate and unimplemented.
+judgments cannot mark them reviewed.
+
+### Calibrated candidate judgments
+
+```sh
+node benchmarks/runner.mjs judge \
+  --catalog private/benchmarks/reviewed-suite/catalog.json \
+  --left private/benchmarks/runs/candidate-run \
+  --provider-config private/benchmarks/judge-provider.json \
+  --calibration private/benchmarks/reviewed-calibration.json \
+  --calibration-run private/benchmarks/calibration/passed-run \
+  --output private/benchmarks/judgments/new-run
+node benchmarks/runner.mjs score \
+  --catalog private/benchmarks/reviewed-suite/catalog.json \
+  --output private/benchmarks/runs/candidate-run \
+  --reviews private/benchmarks/judgments/new-run/reviews.json
+```
+
+Use the candidate run's `--repeat` value when scoring a repeated run. Before any
+provider dispatch, `judge` requires reviewed gold, unchanged execution inputs,
+a completed passing calibration with the same frozen provider/benchmark identity,
+and re-evaluates the calibration judgments against the exact reference file.
+Changing model, adapter, configuration or benchmark code requires recalibration.
+Holdout remains unsupported. The reference-set gate does not establish universal
+judge correctness or independently prove that a declared human review happened.
+
+Each completed attempt is judged once using the existing blinded, range-clipped
+packet. Candidate/model metadata and attempt bindings stay outside the request.
+All four semantic dimensions must pass the existing review contract; artifacts,
+cases and gold remain hash-bound when `score` imports the result.
+
+The judge run has its own bounded ledger and report; its costs are separate from
+the candidate's compile/answer totals. Failed or partial runs retain private
+evidence and `partial-reviews.json`, but publish `reviews.json` only after all
+completed attempts are assessed with known usage. No automatic retries occur.
+Simulation is explicitly attributed in both the report and review records.
