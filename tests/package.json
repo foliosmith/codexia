@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "e2e": "cd .. && playwright test tests/*.spec.mjs --workers=1 --output=private/acceptance/playwright --reporter=line",
-    "benchmark": "cd .. && playwright test tests/benchmark.spec.mjs --workers=1 --output=private/acceptance/benchmarks --reporter=line"
+    "benchmark": "cd .. && playwright test tests/benchmark.spec.mjs tests/deepseek.spec.mjs --workers=1 --output=private/acceptance/benchmarks --reporter=line"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0"

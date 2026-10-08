@@ -277,3 +277,20 @@ compilation. Failed or interrupted compile calls remain in the ledger; cold
 attempts retain their compile-call counts even when final artifacts were not saved.
 An exhausted budget can leave a partial package and no answers; this is a recorded
 failure, not permission to silently raise a limit or fall back to offline answers.
+
+### DeepSeek bounded Reader smoke
+
+Use `benchmarks/adapters/deepseek.mjs` as the configured adapter and supply
+`DEEPSEEK_API_KEY` only through the process environment. Select an explicit
+available model and record current official USD rates in the private provider
+configuration. Never store the key in that configuration or captured inputs.
+The adapter uses the fixed official HTTPS endpoint, rejects redirects, performs
+one request without retries, disables thinking, caps input at 65,536 bytes and
+output at 1,024 tokens, and times out after 45 seconds. Allow a longer case
+timeout for Reader startup. Token usage is retained even for truncated or invalid
+JSON output; missing usage stops subsequent dispatch through the shared ledger.
+
+This adapter is for short Reader requests and refuses compilation tasks. Keep
+compilation offline for this smoke; configured-provider Compiler acceptance is
+separate. Start with original public fixtures and a small invocation allowance.
+Reported costs are estimates using the supplied pricing snapshot, not invoices.
