@@ -47,7 +47,7 @@ export function budgetSummary(ledger, phase) {
 }
 
 export function reserveInvocation(directory, id, inputBytes, phase = 'answer') {
-  assert.ok(['compile', 'answer'].includes(phase), 'unsupported provider phase');
+  assert.ok(['compile', 'answer', 'judge'].includes(phase), 'unsupported provider phase');
   const release = acquireLock(directory, true);
   try {
     const config = read(join(directory, 'config.json'));

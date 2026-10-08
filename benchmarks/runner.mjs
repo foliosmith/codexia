@@ -12,6 +12,7 @@ import { compile, execute, collectCalls } from './adapters/a0.mjs';
 import { report } from './scoring/score.mjs';
 import { template, validateReviews, preparePackets } from './scoring/review.mjs';
 import { calibration } from './scoring/calibration.mjs';
+import { judgeCalibration } from './scoring/judge.mjs';
 import { compare } from './compare.mjs';
 import { auditCorpus } from './corpus.mjs';
 import { providerConfig, usageRecord } from './budget.mjs';
@@ -51,7 +52,7 @@ try {
     'compile-with-provider': { type: 'boolean', default: false },
   }, allowPositionals: true });
   const command = positionals[0];
-  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>] [--calibration <reference.json>] [--provider-config <private-config.json>] [--compile-with-provider]');
+  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'judge-calibration', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|judge-calibration|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>] [--calibration <reference.json>] [--provider-config <private-config.json>] [--compile-with-provider]');
   assert.ok(['A0', 'A1'].includes(values.candidate), 'candidate must be A0 or A1');
   assert.ok(!(values['provider-config'] && values['agent-command']), 'use either provider-config or an offline/replay agent-command');
   assert.ok(!values['compile-with-provider'] || values['provider-config'], 'compile-with-provider requires provider-config');
@@ -69,6 +70,11 @@ try {
     const result = calibration(command, values.output, values.judgments, values.calibration);
     console.log(JSON.stringify(result));
     if (result.state === 'evaluated' && !result.calibrated) process.exitCode = 1;
+  }
+  else if (command === 'judge-calibration') {
+    const result = await judgeCalibration(values.output, values['provider-config'], values.calibration, controller.signal);
+    console.log(JSON.stringify(result));
+    if (result.status !== 'completed' || (result.calibration?.state === 'evaluated' && !result.calibrated)) process.exitCode = 1;
   }
   else if (command === 'validate') {
     const provider = values['provider-config'] ? providerConfig(values['provider-config']) : null;

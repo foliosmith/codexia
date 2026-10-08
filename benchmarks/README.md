@@ -204,8 +204,8 @@ Pass `--provider-config private/benchmarks/provider.json` to `run` and `resume`.
 This replaces `--agent-command`, enables the configured model through the existing
 JSON stdin/stdout adapter, and freezes the model, adapter hash, limits and pricing.
 Reader answering uses this configuration; compilation is offline registration
-unless `--compile-with-provider` is also supplied. Automatic model judging is not
-implemented. No online call is
+unless `--compile-with-provider` is also supplied. Automatic calibration judging requires the explicit `judge-calibration` command;
+automatic candidate semantic scoring is not implemented. No online call is
 made by default, validation, report generation or corpus auditing.
 
 For a config at that path, this is a template, not usable pricing. Replace all
@@ -294,3 +294,25 @@ This adapter is for short Reader requests and refuses compilation tasks. Keep
 compilation offline for this smoke; configured-provider Compiler acceptance is
 separate. Start with original public fixtures and a small invocation allowance.
 Reported costs are estimates using the supplied pricing snapshot, not invoices.
+
+### Automatic calibration judgments
+
+```sh
+node benchmarks/runner.mjs judge-calibration \
+  --provider-config private/benchmarks/judge-provider.json \
+  --output private/benchmarks/calibration/new-run
+```
+
+Optionally supply `--calibration` with an attributed reviewed reference set.
+Each sample is sent separately without reference expectations; the provider sees
+only source, question, answer, rubric and output shape. The fresh private run
+records frozen judge identity, requests, outputs, a `judge` phase budget ledger,
+partial judgments and a report. It never retries or overwrites existing runs.
+Invalid output, missing usage, timeout or exhausted allowance stops further
+dispatch. Token/money thresholds remain post-usage checks, not hard spending caps.
+
+A completed invocation is not a calibration pass. The existing admission rule
+still requires at least 20 independently reviewed references, all judgments, and
+exact agreement. Default references are drafts, so simulated or real generated
+judgments cannot mark them reviewed. This command implements calibration judging;
+automatic semantic scoring of candidate runs remains separate and unimplemented.
