@@ -8,6 +8,53 @@ import { resolve, join, relative } from 'node:path';
 const runner = resolve('benchmarks/runner.mjs');
 const invoke = (...args) => spawnSync(process.execPath, [runner, ...args], { encoding: 'utf8', timeout: 120000 });
 
+test('configured compilation shares the run ledger and cold attempt invocation budget', async ({}, info) => {
+  test.setTimeout(120000);
+  for (const mode of ['complete', 'global-limit', 'case-limit']) {
+    const suite = info.outputPath(mode);
+    cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+    const item = JSON.parse(readFileSync(join(suite, 'cases.jsonl'), 'utf8').split('\n')[0]);
+    item.budget.max_calls = mode === 'case-limit' ? 3 : 5;
+    writeFileSync(join(suite, 'cases.jsonl'), JSON.stringify(item) + '\n');
+    writeFileSync(join(suite, 'gold.jsonl'), readFileSync(join(suite, 'gold.jsonl'), 'utf8').split('\n')[0] + '\n');
+    const helper = relative(suite, resolve('tests/fixtures/analyzer.mjs'));
+    writeFileSync(join(suite, 'provider.mjs'), `#!/usr/bin/env node
+import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';import {resolve,dirname} from 'node:path';import {fileURLToPath} from 'node:url';
+const chunks=[];for await(const c of process.stdin)chunks.push(c);
+writeFileSync(process.env.CODEXIA_USAGE_FILE,JSON.stringify({input_tokens:100,output_tokens:20}));
+const result=spawnSync(process.execPath,[resolve(dirname(fileURLToPath(import.meta.url)),${JSON.stringify(helper)})],{input:Buffer.concat(chunks)});process.stdout.write(result.stdout);process.exit(result.status??1);
+`, { mode: 0o755 });
+    const config = { evidence: 'simulation', adapter: './provider.mjs', model: 'synthetic-compile-provider', max_invocations: mode === 'global-limit' ? 2 : 5, max_request_bytes: 524288, stop_after_input_tokens: 50000, stop_after_output_tokens: 50000, stop_after_estimated_usd: 1, pricing: { source: 'Synthetic regression rates', as_of: '2026-10-08', input_per_million: 1, cached_input_per_million: 0, output_per_million: 1 } };
+    const configFile = join(suite, 'provider.json');
+    writeFileSync(configFile, JSON.stringify(config));
+    const run = join(suite, 'run');
+    const validation = invoke('validate', '--catalog', join(suite, 'catalog.json'), '--provider-config', configFile);
+    expect(validation.status, validation.stderr).toBe(0);
+    expect(JSON.parse(validation.stdout).provider_config_hash).toHaveLength(64);
+    const result = invoke('run', '--catalog', join(suite, 'catalog.json'), '--provider-config', configFile, '--compile-with-provider', '--mode', 'cold-compile-reader', '--output', run);
+    expect(result.status, result.stderr).toBe(mode === 'complete' ? 0 : 1);
+    const report = JSON.parse(readFileSync(join(run, 'report.json')));
+    const compileCalls = mode === 'complete' ? 4 : mode === 'global-limit' ? 2 : 3;
+    expect(report.provider_budget.phases.compile.invocations).toBe(compileCalls);
+    expect(report.provider_budget.phases.answer.invocations).toBe(mode === 'complete' ? 1 : 0);
+    expect(report.costs.compile_usd).toBeCloseTo(compileCalls * 0.00012, 9);
+    expect(report.costs.answer_usd).toBeCloseTo(mode === 'complete' ? 0.00012 : 0, 9);
+    const trial = JSON.parse(readFileSync(join(run, 'trials.jsonl'), 'utf8'));
+    expect(trial.call_count).toBe(mode === 'complete' ? 5 : compileCalls);
+    if (mode !== 'complete') expect(trial.status).toBe('budget_exceeded');
+    expect(JSON.parse(readFileSync(join(run, 'manifest.json'))).compiler).toBe('configured-provider');
+    if (mode === 'complete') {
+      unlinkSync(join(run, 'attempts/citation-1/trial.json'));
+      unlinkSync(join(run, 'attempts/citation-1/artifact.json'));
+      expect(invoke('resume', '--catalog', join(suite, 'catalog.json'), '--provider-config', configFile, '--compile-with-provider', '--mode', 'cold-compile-reader', '--output', run).status).toBe(1);
+      const recovered = JSON.parse(readFileSync(join(run, 'trials.jsonl'), 'utf8'));
+      expect(recovered.status).toBe('cancelled');
+      expect(recovered.call_count).toBe(5);
+      expect(JSON.parse(readFileSync(join(run, 'budget/ledger.json'))).calls).toHaveLength(5);
+    }
+  }
+});
+
 test('provider budget caps invocations, accounts cache usage and stops on unknown cost', async ({}, info) => {
   test.setTimeout(120000);
   for (const mode of ['count', 'cost', 'unknown']) {

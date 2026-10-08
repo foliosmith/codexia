@@ -40,12 +40,14 @@ export function cost(usage, pricing) {
   return Number.isFinite(value) ? value : null;
 }
 
-export function budgetSummary(ledger) {
-  const known = ledger.calls.filter(call => usageRecord(call.usage) && Number.isFinite(call.estimated_usd));
-  return { invocations: ledger.calls.length, known_usage_calls: known.length, unknown_usage_calls: ledger.calls.length - known.length, input_tokens: known.reduce((n, c) => n + c.usage.input_tokens, 0), output_tokens: known.reduce((n, c) => n + c.usage.output_tokens, 0), known_estimated_usd: known.reduce((n, c) => n + c.estimated_usd, 0) };
+export function budgetSummary(ledger, phase) {
+  const calls = phase ? ledger.calls.filter(c => (c.phase ?? 'answer') === phase) : ledger.calls;
+  const known = calls.filter(call => usageRecord(call.usage) && Number.isFinite(call.estimated_usd));
+  return { invocations: calls.length, known_usage_calls: known.length, unknown_usage_calls: calls.length - known.length, input_tokens: known.reduce((n, c) => n + c.usage.input_tokens, 0), output_tokens: known.reduce((n, c) => n + c.usage.output_tokens, 0), known_estimated_usd: known.reduce((n, c) => n + c.estimated_usd, 0) };
 }
 
-export function reserveInvocation(directory, id, inputBytes) {
+export function reserveInvocation(directory, id, inputBytes, phase = 'answer') {
+  assert.ok(['compile', 'answer'].includes(phase), 'unsupported provider phase');
   const release = acquireLock(directory, true);
   try {
     const config = read(join(directory, 'config.json'));
@@ -60,7 +62,7 @@ export function reserveInvocation(directory, id, inputBytes) {
     else if (summary.output_tokens >= config.stop_after_output_tokens) reason = 'reported_output_token_threshold';
     else if (summary.known_estimated_usd >= config.stop_after_estimated_usd) reason = 'estimated_cost_threshold';
     if (reason) return { allowed: false, reason };
-    ledger.calls.push({ id, status: 'reserved', usage: null, estimated_usd: null, input_bytes: inputBytes });
+    ledger.calls.push({ id, phase, status: 'reserved', usage: null, estimated_usd: null, input_bytes: inputBytes });
     save(join(directory, 'ledger.json'), ledger);
     return { allowed: true, config };
   } finally { release(); }

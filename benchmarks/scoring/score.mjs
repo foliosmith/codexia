@@ -61,11 +61,17 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
   const counts = values => Object.fromEntries([...new Set(values)].map(value => [value, values.filter(v => v === value).length]));
   const execution = counts(trials.map(t => t.status));
   let providerBudget = null;
+  let compileCost = null;
+  let answerCost = null;
   if (manifest.provider_config_hash) {
     const config = read(join(directory, 'budget/config.json'));
     if (hash(JSON.stringify(config)) !== manifest.provider_config_hash) throw new Error('provider pricing or limits changed');
-    const summary = budgetSummary(read(join(directory, 'budget/ledger.json')));
-    providerBudget = { ...summary, model: config.model, evidence: config.evidence, pricing: config.pricing, max_invocations: config.max_invocations, stop_after_estimated_usd: config.stop_after_estimated_usd, estimated_overshoot_usd: Math.max(0, summary.known_estimated_usd - config.stop_after_estimated_usd), hard_spend_cap: false, basis: 'Adapter invocations are capped; token and estimated cost thresholds stop later calls only. Provider retries are internal to an invocation. Unknown or interrupted usage blocks further dispatch.' };
+    const ledger = read(join(directory, 'budget/ledger.json'));
+    const summary = budgetSummary(ledger);
+    const phases = { compile: budgetSummary(ledger, 'compile'), answer: budgetSummary(ledger, 'answer') };
+    if (manifest.compiler === 'configured-provider' && !phases.compile.unknown_usage_calls) compileCost = phases.compile.known_estimated_usd;
+    if (!phases.answer.unknown_usage_calls) answerCost = phases.answer.known_estimated_usd;
+    providerBudget = { ...summary, phases, model: config.model, evidence: config.evidence, pricing: config.pricing, max_invocations: config.max_invocations, stop_after_estimated_usd: config.stop_after_estimated_usd, estimated_overshoot_usd: Math.max(0, summary.known_estimated_usd - config.stop_after_estimated_usd), hard_spend_cap: false, basis: 'Adapter invocations are capped across compile and answer; reported token/cost thresholds stop later calls only. Provider retries are internal to an invocation. Unknown or interrupted usage blocks further dispatch.' };
   }
   function group(key) {
     const groups = {};
@@ -102,13 +108,13 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     task_successes: scores.filter(s => s.task_success === true).length,
     quality: scores.some(s => s.hard_failures.length || s.task_success === false) ? 'fail' : 'inconclusive',
     calls: trials.reduce((sum, t) => sum + t.call_count, 0), usage_coverage: { known_calls: trials.reduce((sum, t) => sum + t.known_usage_calls, 0), total_calls: trials.reduce((sum, t) => sum + t.call_count, 0) },
-    costs: { compile_usd: null, answer_usd: providerBudget && !providerBudget.unknown_usage_calls ? providerBudget.known_estimated_usd : null, answer_known_estimated_usd: providerBudget?.known_estimated_usd ?? null, judge_usd: null, basis: 'Operator-supplied rate estimate for reported answering usage only; compile/judge costs are not established. Not an invoice or hard spending cap.' },
+    costs: { compile_usd: compileCost, answer_usd: answerCost, compile_known_estimated_usd: providerBudget?.phases.compile.known_estimated_usd ?? null, answer_known_estimated_usd: providerBudget?.phases.answer.known_estimated_usd ?? null, judge_usd: null, basis: 'Operator-supplied rate estimate for reported compile/answer usage; judge cost is not established. Not an invoice or hard spending cap.' },
     provider_budget: providerBudget,
     duration_ms: trials.map(t => t.duration_ms),
     dimensions: group(c => c.dimensions), books: group(c => [c.book_id]), languages: group(c => [suite.books.get(c.book_id).language]), tasks: group(c => c.steps.map(s => s.task)), suites: group(c => [c.suite]),
     package_evaluations: packageEvaluations, retrieval,
     mode: manifest.mode, compilations: [...compilations.values()], reader_timings: readerTimings,
-    limitations: ['Draft gold is not independent human review.', 'Compiler remains offline registration; offline/replay/simulation responses are not new online model evidence.', 'Held-out process isolation, online compiler/judge budgeting and hard monetary enforcement are not implemented.'],
+    limitations: ['Draft gold is not independent human review.', `Compiler mode: ${manifest.compiler}; offline/replay/simulation responses are not new online model evidence.`, 'Held-out process isolation, automatic model judge budgeting and hard monetary enforcement are not implemented.'],
     scores,
   };
   save(join(directory, 'report.json'), result);

@@ -163,7 +163,8 @@ registration package per book and shares it across isolated Reader attempts.
 includes that compilation in its wall time. Resume requires the original mode;
 finished attempts are not recompiled, and an interrupted cold attempt remains a
 failure rather than being relabelled a warm success. Warm-cache experiments are
-not implemented. Both modes still use the offline registration compiler adapter.
+not implemented. Both modes use offline registration unless explicitly configured
+with `--compile-with-provider` as described below.
 In cold mode, the case's `timeout_ms` covers source preparation, compilation,
 validation and Reader execution together. A compile timeout remains a failed
 attempt with a compilation record and no claimed Reader result.
@@ -202,8 +203,9 @@ a known outcome; there is no best-of-N success selection.
 Pass `--provider-config private/benchmarks/provider.json` to `run` and `resume`.
 This replaces `--agent-command`, enables the configured model through the existing
 JSON stdin/stdout adapter, and freezes the model, adapter hash, limits and pricing.
-Only Reader answering uses this configuration: compilation remains offline
-registration and automatic model judging is not implemented. No online call is
+Reader answering uses this configuration; compilation is offline registration
+unless `--compile-with-provider` is also supplied. Automatic model judging is not
+implemented. No online call is
 made by default, validation, report generation or corpus auditing.
 
 For a config at that path, this is a template, not usable pricing. Replace all
@@ -252,8 +254,26 @@ Do not delete or reset the ledger to retry: resume preserves consumed reservatio
 and rejects changed models, adapters, pricing or limits. An interrupted reservation
 can conservatively stop a run even if later logs contain usage.
 
-`budget/ledger.json` records unique invocation identities. Reports distinguish
-known estimated answering cost from incomplete totals; compile/judge amounts stay
-null. Rates are operator-supplied API-equivalent estimates, not an account invoice.
+`budget/ledger.json` records unique invocation identities and compile/answer phases.
+Reports distinguish known estimated costs from incomplete totals; offline compile
+and unconfigured judge amounts stay null. Rates are operator-supplied API-equivalent
+estimates, not an account invoice.
 Use provider-enforced limits if an absolute monetary ceiling is required. Existing
 private originals and capture retention rules still apply to all online inputs.
+
+`validate --provider-config <file>` validates configuration without dispatching.
+Add `--compile-with-provider` to both run and resume to use the configured adapter
+for chapter analysis and synthesis as well as Reader answering. Those calls share
+one global invocation/token/cost ledger. Native compilation still validates and
+publishes the package; changing model, adapter or benchmark revision changes its
+analysis cache identity. The configured adapter uses its own default prompt version
+rather than an inherited `CODEXIA_ANALYZER_PROMPT_VERSION` override.
+
+In cold mode, the case's `max_calls` includes compilation and answering; for the
+three-chapter controlled book a complete run needs four compile calls before the
+Reader call. In fixed-package mode, shared compilation consumes the global budget
+once and the per-case limit covers Reader calls. No applicable cases means no
+compilation. Failed or interrupted compile calls remain in the ledger; cold
+attempts retain their compile-call counts even when final artifacts were not saved.
+An exhausted budget can leave a partial package and no answers; this is a recorded
+failure, not permission to silently raise a limit or fall back to offline answers.

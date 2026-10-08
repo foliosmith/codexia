@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { root, read, hash } from '../data.mjs';
 import { save, treeHash, treeBytes } from '../storage.mjs';
 
-export function compile(book, directory, binary, timeoutMs = 120000) {
+export function compile(book, directory, binary, timeoutMs = 120000, budgetDirectory = '', maxInvocations) {
   const deadline = performance.now() + timeoutMs;
   const remaining = () => {
     const value = Math.floor(deadline - performance.now());
@@ -25,11 +25,14 @@ export function compile(book, directory, binary, timeoutMs = 120000) {
   assert.equal(hash(readFileSync(epub)), read(join(directory, 'source-identity.json')).sha256, 'compile source changed');
   const pkg = join(directory, 'package');
   const start = performance.now();
-  const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', join(root, 'tests/fixtures/analyzer.mjs'), '--analysis-jobs', '1'], { timeout: remaining(), env: { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '' } });
+  const config = budgetDirectory ? read(join(budgetDirectory, 'config.json')) : null;
+  const analyzer = config ? join(root, 'benchmarks/adapters/capture.mjs') : join(root, 'tests/fixtures/analyzer.mjs');
+  const env = { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '', ...(config ? { CODEXIA_BENCH_BUDGET_DIR: budgetDirectory, CODEXIA_BENCH_ATTEMPT: directory, CODEXIA_BENCH_AGENT: config.adapter, CODEXIA_BENCH_MAX_CALLS: String(maxInvocations ?? config.max_invocations), CODEXIA_READER_TIMEOUT_MS: String(timeoutMs), CODEXIA_ANALYZER_MODEL: config.model, CODEXIA_ANALYZER_PROMPT_VERSION: undefined, CODEXIA_ANALYZER_REVISION: hash(JSON.stringify(config) + treeHash(join(root, 'benchmarks'))) } : {}) };
+  const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', analyzer, '--analysis-jobs', '1'], { timeout: remaining(), env });
   execFileSync(binary, ['validate', pkg], { timeout: Math.min(10000, remaining()) });
   const analysisFiles = ['book_map.json', 'concepts.json', 'claims.json', 'entities.json', 'checkpoints.json', 'recall_cards.json'];
   const analysisBytes = treeBytes(join(pkg, 'chapters')) + analysisFiles.filter(name => existsSync(join(pkg, name))).reduce((sum, name) => sum + statSync(join(pkg, name)).size, 0);
-  save(join(directory, 'compile.json'), { mode: 'offline-registration', status: 'completed', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
+  save(join(directory, 'compile.json'), { mode: config ? 'configured-provider' : 'offline-registration', status: 'completed', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
   return pkg;
 }
 
