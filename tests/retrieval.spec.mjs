@@ -33,7 +33,7 @@ process.stdout.write(JSON.stringify({cards:[{card_type:'answer',card_id:'answer'
   const offered=contexts().at(-1).context;expect(offered.nearby_blocks.some(b=>b.chapter_id==='chapter_002')).toBe(true);expect(offered.nearby_blocks.some(b=>b.chapter_id==='chapter_003')).toBe(true);expect(JSON.stringify(offered)).not.toContain('NIGHTJAR');expect(JSON.stringify(offered)).not.toContain('Preface material');
   const current=(await content('chapter_003')).blocks.find(b=>b.text.includes('northern'));
   const connected=await request.post(book+'/explain',{data:{selected_text:current.text,source_ref:{block_id:current.block_id,start_char:0,end_char:[...current.text].length,text_fingerprint:current.text_fingerprint},reader_state:session,spoiler_mode:'read_range',intent:'connect'}});expect(connected.status()).toBe(200);expect(contexts().at(-1).context.nearby_blocks.some(b=>b.chapter_id==='chapter_002')).toBe(true);
-  const chinese=await ask('青铜罗盘');expect(chinese.status()).toBe(200);expect((await chinese.json()).cards[0].content.answer).toContain('青铜罗盘属于米拉');
+  const chinese=await ask('青铜罗盘');expect(chinese.status()).toBe(200);const chineseCard=(await chinese.json()).cards[0];expect(chineseCard.content.answer).toContain('青铜罗盘属于米拉。 🧭');expect(first.text.length).toBe([...first.text].length+1);expect(chineseCard.source_refs.find(ref=>ref.block_id===first.block_id).end_char).toBe([...first.text].length);
   const before=contexts().length;
   for(const question of ['Where is plutonium stored?','What is the NIGHTJAR password?']){const r=await ask(question);expect(r.status()).toBe(200);expect((await r.json()).cards[0].content.insufficient_evidence).toBe(true);}
   expect(contexts()).toHaveLength(before);

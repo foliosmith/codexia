@@ -27,6 +27,7 @@ test('logical chapters retain physical provenance, span files and isolate skippe
   writeFileSync(info.outputPath('sections-evidence.json'),JSON.stringify({sections:ir.logical_sections,pride:pride.logical_sections.map(s=>s.title),session:updated},null,2));
  }finally{const ended=once(server,'exit');server.kill();await ended;}
  const statePath=join(root,'state','reader_state.json');const legacy=JSON.parse(readFileSync(statePath));delete legacy.reading_layout;writeFileSync(statePath,JSON.stringify(legacy));
- const incompatible=spawnSync(binary,['serve',pkg,'--state-dir',join(root,'state')],{encoding:'utf8',timeout:3000});expect(incompatible.status).toBe(1);expect(incompatible.stderr).toContain('another chapter layout');
+ const preservedState=readFileSync(statePath);
+ const incompatible=spawnSync(binary,['serve',pkg,'--state-dir',join(root,'state')],{encoding:'utf8',timeout:3000});expect(incompatible.status).toBe(1);expect(incompatible.stderr).toContain('another chapter layout');expect(readFileSync(statePath)).toEqual(preservedState);
  ir.logical_sections[1].ranges[0].block_ids.pop();writeFileSync(join(pkg,'book_ir.json'),JSON.stringify(ir));expect(spawnSync(binary,['validate',pkg]).status).toBe(1);
 });

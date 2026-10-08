@@ -5,7 +5,7 @@ export function compileSections(root,analyzer=resolve('tests/fixtures/analyzer.m
 root=sys.argv[1]
 for mode in ['normal','missing']:
  nav='<nav epub:type="toc"><ol>'+''.join('<li><a href="'+href+'">'+title+'</a></li>' for title,href in [('Preface','a.xhtml#intro'),('Chapter I','a.xhtml#one'),('Chapter II','a.xhtml#'+('two' if mode=='normal' else 'missing')),('Chapter III','c.xhtml#three')])+'</ol></nav>'
- docs={'a.xhtml':'<h1 id="intro">Preface</h1><p>Preface material.</p><h1 id="one">Chapter I</h1><p>The bronze compass belongs to Mira. 青铜罗盘属于米拉。</p><h1 id="two">Chapter II</h1><p>Jon follows the northern river with the bronze compass.</p>','b.xhtml':'<p>The second chapter continues across this file.</p>','c.xhtml':'<h1 id="three">Chapter III</h1><p>The hidden password is NIGHTJAR.</p>'}
+ docs={'a.xhtml':'<h1 id="intro">Preface</h1><p>Preface material.</p><h1 id="one">Chapter I</h1><p>The bronze compass belongs to Mira. 青铜罗盘属于米拉。 🧭</p><h1 id="two">Chapter II</h1><p>Jon follows the northern river with the bronze compass.</p>','b.xhtml':'<p>The second chapter continues across this file.</p>','c.xhtml':'<h1 id="three">Chapter III</h1><p>The hidden password is NIGHTJAR.</p>'}
  with zipfile.ZipFile(root+'/'+mode+'.epub','w') as z:
   z.writestr('mimetype','application/epub+zip')
   z.writestr('META-INF/container.xml','<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
