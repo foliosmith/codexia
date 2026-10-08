@@ -45,8 +45,8 @@ extracts offered source blocks and never judges semantic correctness.
 
 `--agent-command <executable>` supplies an offline/replay adapter using the existing
 JSON stdin/stdout contract. It is trusted executable code, not a sandbox; never
-use this option for an unbudgeted online provider. Online runs and held-out runs
-are currently rejected/not implemented. `--repeat 3` records three independent
+use this option for an unbudgeted online provider. Explicit Reader provider calls
+use `--provider-config` below; held-out runs remain disabled. `--repeat 3` records three independent
 sessions per case; pass the same repeat and adapter on resume/report.
 
 All actual outputs must be under this checkout's `private/`, with no symlink
@@ -196,3 +196,64 @@ held-out execution remains disabled even for a valid split.
 `repeated_cases` records every planned and completed attempt per question and the
 number of successes. `all_passed` remains null until every planned attempt has
 a known outcome; there is no best-of-N success selection.
+
+## Explicit Reader provider configuration
+
+Pass `--provider-config private/benchmarks/provider.json` to `run` and `resume`.
+This replaces `--agent-command`, enables the configured model through the existing
+JSON stdin/stdout adapter, and freezes the model, adapter hash, limits and pricing.
+Only Reader answering uses this configuration: compilation remains offline
+registration and automatic model judging is not implemented. No online call is
+made by default, validation, report generation or corpus auditing.
+
+For a config at that path, this is a template, not usable pricing. Replace all
+angle-bracket fields with your chosen model and numeric rate snapshot. Do not put
+API keys or credentials in this file; use the adapter's existing authentication.
+Unknown fields, including credential fields, are rejected before a run is created.
+
+```json
+{
+  "evidence": "online",
+  "adapter": "../../scripts/online-analyzer.mjs",
+  "model": "<explicit-model>",
+  "max_invocations": 3,
+  "max_request_bytes": 65536,
+  "stop_after_input_tokens": 20000,
+  "stop_after_output_tokens": 10000,
+  "stop_after_estimated_usd": 1,
+  "pricing": {
+    "source": "<rate-source>",
+    "as_of": "<YYYY-MM-DD>",
+    "input_per_million": "<numeric-rate>",
+    "cached_input_per_million": "<numeric-rate>",
+    "output_per_million": "<numeric-rate>"
+  }
+}
+```
+
+Adapter paths are relative to the config file. `evidence: "simulation"` uses the
+same accounting path for local fixture adapters and is never reported as online
+evidence. The standard online adapter must use this configuration rather than the
+unbudgeted replay option. Other executables remain trusted adapter code, not an
+OS sandbox or a guarantee against undisclosed provider-side requests.
+
+The invocation count is a hard dispatcher limit across all attempts, reserved
+before spawning and never refunded for failed starts. A provider can retry
+internally: one invocation is not necessarily one HTTP/model request. Byte limits
+apply to the serialized Codexia request, before the adapter adds its own prompt.
+The case deadline still bounds the local process; it is not a remote billing cap.
+
+Token and cost values are **stop thresholds on reported usage**, not hard spending
+limits. A single call can cross a threshold; the report shows the overshoot and
+blocks later dispatch. Unknown, invalid, interrupted or unsupported usage (such as
+cache-write usage without a supported price contract) also blocks further calls.
+Cached input is priced separately. Failed calls with reported usage are included.
+Do not delete or reset the ledger to retry: resume preserves consumed reservations
+and rejects changed models, adapters, pricing or limits. An interrupted reservation
+can conservatively stop a run even if later logs contain usage.
+
+`budget/ledger.json` records unique invocation identities. Reports distinguish
+known estimated answering cost from incomplete totals; compile/judge amounts stay
+null. Rates are operator-supplied API-equivalent estimates, not an account invoice.
+Use provider-enforced limits if an absolute monetary ceiling is required. Existing
+private originals and capture retention rules still apply to all online inputs.

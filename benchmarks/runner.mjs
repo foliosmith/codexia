@@ -14,6 +14,7 @@ import { template, validateReviews, preparePackets } from './scoring/review.mjs'
 import { calibration } from './scoring/calibration.mjs';
 import { compare } from './compare.mjs';
 import { auditCorpus } from './corpus.mjs';
+import { providerConfig, usageRecord } from './budget.mjs';
 
 process.umask(0o077);
 const controller = new AbortController();
@@ -46,10 +47,12 @@ try {
     mode: { type: 'string', default: 'fixed-package-reader' },
     holdout: { type: 'string' },
     calibration: { type: 'string' },
+    'provider-config': { type: 'string' },
   }, allowPositionals: true });
   const command = positionals[0];
-  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>] [--calibration <reference.json>]');
+  assert.ok(positionals.length === 1 && ['validate', 'run', 'resume', 'report', 'score', 'review-template', 'prepare-review', 'prepare-calibration', 'calibrate', 'compare', 'audit-corpus', 'export'].includes(command), 'usage: node benchmarks/runner.mjs <validate|run|resume|report|score|review-template|prepare-review|prepare-calibration|calibrate|compare|audit-corpus|export> [--catalog <file>] [--output <private-directory>] [--candidate A0|A1] [--mode fixed-package-reader|cold-compile-reader] [--repeat <1..10>] [--agent-command <offline-replay-executable>] [--reviews <file>] [--judgments <file>] [--left <run>] [--right <run>] [--holdout <catalog>] [--calibration <reference.json>] [--provider-config <private-config.json>]');
   assert.ok(['A0', 'A1'].includes(values.candidate), 'candidate must be A0 or A1');
+  assert.ok(!(values['provider-config'] && values['agent-command']), 'use either provider-config or an offline/replay agent-command');
   assert.ok(['fixed-package-reader', 'cold-compile-reader'].includes(values.mode), 'mode must be fixed-package-reader or cold-compile-reader');
   assert.ok(!values.reviews || ['score', 'report', 'export'].includes(command), '--reviews requires score/report/export');
   if (command === 'score') assert.ok(values.reviews, 'score requires --reviews');
@@ -73,17 +76,23 @@ try {
     assert.ok(values.output || command === 'run', 'resume/report require --output');
     const directory = privatePath(values.output || join(root, 'private/benchmarks/runs', randomUUID()));
     const binary = resolve(values.binary);
-    const agent = resolve(values['agent-command'] || join(root, 'benchmarks/adapters/extract.mjs'));
     const executing = ['run', 'resume'].includes(command);
-    const identity = executing ? { suite_hash: suite.fingerprint, execution_hash: suite.executionHash, binary_hash: hash(readFileSync(binary)), agent_hash: hash(readFileSync(agent)), benchmark_hash: treeHash(join(root, 'benchmarks')), registration_analyzer_hash: hash(readFileSync(join(root, 'tests/fixtures/analyzer.mjs'))) } : null;
+    const provider = values['provider-config'] ? providerConfig(values['provider-config']) : null;
+    const agent = resolve(provider?.adapter || values['agent-command'] || join(root, 'benchmarks/adapters/extract.mjs'));
+    if (executing && !provider) assert.notEqual(agent, join(root, 'scripts/online-analyzer.mjs'), 'online adapter requires --provider-config');
+    const identity = executing ? { suite_hash: suite.fingerprint, execution_hash: suite.executionHash, provider_config_hash: provider ? hash(JSON.stringify(provider)) : null, binary_hash: hash(readFileSync(binary)), agent_hash: hash(readFileSync(agent)), benchmark_hash: treeHash(join(root, 'benchmarks')), registration_analyzer_hash: hash(readFileSync(join(root, 'tests/fixtures/analyzer.mjs'))) } : null;
     let manifest;
     if (command === 'run') {
       assert.ok(!existsSync(directory), 'use a fresh output directory');
       mkdirSync(dirname(directory), { recursive: true });
       mkdirSync(directory);
       const started = Date.now();
-      manifest = { protocol: '0.0', ...identity, git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), git_diff_hash: hash(execFileSync('git', ['diff', 'HEAD', '--', 'src', 'benchmarks', 'tests/fixtures/analyzer.mjs'], { cwd: root })), evidence: values['agent-command'] ? 'replay' : 'offline', candidate: values.candidate, mode: values.mode, compiler: 'offline-registration', node_version: process.version, repeat, started_at: new Date(started).toISOString(), retention: { content_expires_at: new Date(started + 7 * 86400000).toISOString(), cleanup: 'manual; no automatic deletion' }, status: 'running' };
+      manifest = { protocol: '0.0', ...identity, git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), git_diff_hash: hash(execFileSync('git', ['diff', 'HEAD', '--', 'src', 'benchmarks', 'tests/fixtures/analyzer.mjs'], { cwd: root })), evidence: provider?.evidence || (values['agent-command'] ? 'replay' : 'offline'), candidate: values.candidate, mode: values.mode, compiler: 'offline-registration', node_version: process.version, repeat, started_at: new Date(started).toISOString(), retention: { content_expires_at: new Date(started + 7 * 86400000).toISOString(), cleanup: 'manual; no automatic deletion' }, status: 'running' };
       save(join(directory, 'manifest.json'), manifest);
+      if (provider) {
+        save(join(directory, 'budget/config.json'), provider);
+        save(join(directory, 'budget/ledger.json'), { calls: [] });
+      }
     } else {
       manifest = read(join(directory, 'manifest.json'));
       if (executing) assert.equal(manifest.candidate, values.candidate, 'candidate changed');
@@ -92,6 +101,7 @@ try {
       else if (manifest.execution_hash) assert.equal(manifest.execution_hash, suite.executionHash, 'execution inputs changed; cannot rescore different questions or sources');
       else assert.equal(manifest.suite_hash, suite.fingerprint, 'legacy run needs its original suite; execution identity unavailable');
       assert.equal(manifest.repeat, repeat, 'repeat changed');
+      if (provider) assert.equal(hash(JSON.stringify(read(join(directory, 'budget/config.json')))), manifest.provider_config_hash, 'stored provider config changed');
     }
     let release;
     try {
@@ -125,7 +135,7 @@ try {
                   const remaining = manifest.mode === 'cold-compile-reader' ? Math.floor(item.budget.timeout_ms - (performance.now() - started)) : item.budget.timeout_ms;
                   if (remaining <= 0) throw Object.assign(new Error('attempt timeout'), { code: 'ETIMEDOUT' });
                   const readerStarted = performance.now();
-                  artifact = await execute({ item: { ...item, budget: { ...item.budget, timeout_ms: remaining } }, book, pkg: join(compilation, 'package'), directory: attempt, binary, agent, signal: controller.signal, candidate: values.candidate });
+                  artifact = await execute({ item: { ...item, budget: { ...item.budget, timeout_ms: remaining } }, book, pkg: join(compilation, 'package'), directory: attempt, binary, agent, signal: controller.signal, candidate: values.candidate, budgetDirectory: provider ? join(directory, 'budget') : '' });
                   artifact.timing = { reader_ms: Math.round(performance.now() - readerStarted) };
                 }
                 catch (error) {
@@ -134,7 +144,7 @@ try {
                 artifact.compilation = { ...(compilationData || { mode: 'offline-registration', status: 'failed', duration_ms: Math.round(performance.now() - started), source_bytes: null, package_bytes: null, analysis_bytes: null, usage: null, estimated_usd: null }), id: manifest.mode === 'cold-compile-reader' ? id : book.id };
               }
               save(join(attempt, 'artifact.json'), artifact);
-              const trial = { protocol: '0.0', attempt_id: id, case_id: item.id, status: artifact.status, duration_ms: Math.round(performance.now() - started), artifact: `attempts/${id}/artifact.json`, artifact_hash: hash(readFileSync(join(attempt, 'artifact.json'))), call_count: artifact.calls.length, known_usage_calls: artifact.calls.filter(c => c.usage !== null).length };
+              const trial = { protocol: '0.0', attempt_id: id, case_id: item.id, status: artifact.status, duration_ms: Math.round(performance.now() - started), artifact: `attempts/${id}/artifact.json`, artifact_hash: hash(readFileSync(join(attempt, 'artifact.json'))), call_count: artifact.calls.length, known_usage_calls: artifact.calls.filter(c => usageRecord(c.usage)).length };
               save(join(attempt, 'trial.json'), trial);
               summarize(directory, manifest, suite);
             }

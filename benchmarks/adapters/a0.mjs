@@ -55,12 +55,12 @@ async function address() {
   return `127.0.0.1:${port}`;
 }
 
-export async function execute({ item, book, pkg, directory, binary, agent, signal, candidate = 'A0' }) {
+export async function execute({ item, book, pkg, directory, binary, agent, signal, candidate = 'A0', budgetDirectory = '' }) {
   signal = AbortSignal.any([signal, AbortSignal.timeout(item.budget.timeout_ms)]);
   const bind = await address();
   const server = spawn(binary, ['serve', pkg, '--state-dir', join(directory, 'state'), '--bind', bind, '--agent-command', join(root, 'benchmarks/adapters/capture.mjs')], {
     detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'],
-    env: { ...process.env, CODEXIA_BENCH_CANDIDATE: candidate, CODEXIA_BENCH_ATTEMPT: directory, CODEXIA_BENCH_AGENT: agent, CODEXIA_BENCH_MAX_CALLS: String(item.budget.max_calls), CODEXIA_READER_TIMEOUT_MS: String(item.budget.timeout_ms), CODEXIA_MAX_CONTEXT_BYTES: '524288', CODEXIA_MAX_ANALYZERS: '1' },
+    env: { ...process.env, CODEXIA_BENCH_BUDGET_DIR: budgetDirectory, CODEXIA_BENCH_CANDIDATE: candidate, CODEXIA_BENCH_ATTEMPT: directory, CODEXIA_BENCH_AGENT: agent, CODEXIA_BENCH_MAX_CALLS: String(item.budget.max_calls), CODEXIA_READER_TIMEOUT_MS: String(item.budget.timeout_ms), CODEXIA_MAX_CONTEXT_BYTES: '524288', CODEXIA_MAX_ANALYZERS: '1' },
   });
   let serverError;
   server.on('error', error => { serverError = error; });

@@ -3,10 +3,69 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, readFileSync, writeFileSync, existsSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
-import { resolve, join } from 'node:path';
+import { resolve, join, relative } from 'node:path';
 
 const runner = resolve('benchmarks/runner.mjs');
 const invoke = (...args) => spawnSync(process.execPath, [runner, ...args], { encoding: 'utf8', timeout: 120000 });
+
+test('provider budget caps invocations, accounts cache usage and stops on unknown cost', async ({}, info) => {
+  test.setTimeout(120000);
+  for (const mode of ['count', 'cost', 'unknown']) {
+    const suite = info.outputPath(mode);
+    cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
+    for (const name of ['cases', 'gold']) {
+      const file = join(suite, `${name}.jsonl`);
+      writeFileSync(file, readFileSync(file, 'utf8').split('\n').slice(0, 2).join('\n') + '\n');
+    }
+    const helper = relative(suite, resolve('benchmarks/adapters/extract.mjs'));
+    const adapter = join(suite, 'provider.mjs');
+    writeFileSync(adapter, `#!/usr/bin/env node
+import {appendFileSync,writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {dirname,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+const chunks=[];for await(const chunk of process.stdin)chunks.push(chunk);
+appendFileSync(new URL('./invocations.txt',import.meta.url),'called\\n');
+${mode === 'unknown' ? '' : 'writeFileSync(process.env.CODEXIA_USAGE_FILE,JSON.stringify({input_tokens:1000,cached_input_tokens:400,output_tokens:20}));'}
+const result=spawnSync(process.execPath,[resolve(dirname(fileURLToPath(import.meta.url)),${JSON.stringify(helper)})],{input:Buffer.concat(chunks)});
+process.stdout.write(result.stdout);process.exit(result.status??1);
+`, { mode: 0o755 });
+    const config = { evidence: 'simulation', adapter: './provider.mjs', model: 'synthetic-provider', max_invocations: mode === 'count' ? 1 : 5, max_request_bytes: 524288, stop_after_input_tokens: 50000, stop_after_output_tokens: 50000, stop_after_estimated_usd: mode === 'cost' ? 0.001 : 1, pricing: { source: 'Synthetic regression rates, not market pricing', as_of: '2026-10-08', input_per_million: 2, cached_input_per_million: 0.5, output_per_million: 10 } };
+    const configFile = join(suite, 'provider.json');
+    writeFileSync(configFile, JSON.stringify(config));
+    const run = join(suite, 'run');
+    const args = ['--catalog', join(suite, 'catalog.json'), '--provider-config', configFile, '--output', run];
+    const result = invoke('run', ...args);
+    expect(result.status, result.stderr).toBe(1);
+    expect(readFileSync(join(suite, 'invocations.txt'), 'utf8').trim().split('\n')).toHaveLength(1);
+    const report = JSON.parse(readFileSync(join(run, 'report.json')));
+    expect(report.evidence).toBe('simulation');
+    expect(report.execution.budget_exceeded).toBe(1);
+    expect(report.provider_budget.invocations).toBe(1);
+    expect(report.provider_budget.hard_spend_cap).toBe(false);
+    if (mode === 'unknown') {
+      expect(report.costs.answer_usd).toBeNull();
+      expect(report.provider_budget.unknown_usage_calls).toBe(1);
+    } else expect(report.costs.answer_usd).toBeCloseTo(0.0016, 9);
+    if (mode === 'cost') expect(report.provider_budget.estimated_overshoot_usd).toBeCloseTo(0.0006, 9);
+    const denial = JSON.parse(readFileSync(join(run, 'attempts/unsupported-claim-1/budget-exceeded.json')));
+    expect(denial.reason).toBe({ count: 'invocation_limit', cost: 'estimated_cost_threshold', unknown: 'unaccounted_invocation' }[mode]);
+    expect(invoke('resume', ...args).status).toBe(1);
+    expect(readFileSync(join(suite, 'invocations.txt'), 'utf8').trim().split('\n')).toHaveLength(1);
+    config.max_invocations++;
+    writeFileSync(configFile, JSON.stringify(config));
+    expect(invoke('resume', ...args).stderr).toContain('provider_config_hash changed');
+    if (mode === 'count') {
+      config.api_key = 'DO_NOT_PERSIST';
+      writeFileSync(configFile, JSON.stringify(config));
+      const rejectedPath = join(suite, 'invalid-config-run');
+      const rejected = invoke('run', '--catalog', join(suite, 'catalog.json'), '--provider-config', configFile, '--output', rejectedPath);
+      expect(rejected.status).toBe(1);
+      expect(rejected.stderr).not.toContain('DO_NOT_PERSIST');
+      expect(existsSync(rejectedPath)).toBe(false);
+    }
+  }
+});
 
 test('benchmark separates cold compilation from shared-package Reader timing', async ({}, info) => {
   test.setTimeout(120000);

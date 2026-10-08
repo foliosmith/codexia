@@ -32,6 +32,7 @@ export function compare(leftPath, rightPath, output) {
   const left = load(leftPath);
   const right = load(rightPath);
   for (const field of ['protocol', 'evidence', 'mode', 'repeat', 'agent_hash', 'registration_analyzer_hash']) assert.equal(left.manifest[field], right.manifest[field], `incomparable ${field}`);
+  assert.equal(left.manifest.provider_config_hash ?? null, right.manifest.provider_config_hash ?? null, 'incomparable provider model, pricing or limits');
   for (const field of ['suite_hash', 'execution_hash', 'scorer_hash']) assert.ok(left.report[field] && left.report[field] === right.report[field], `incomparable ${field}; rescore both runs consistently`);
   assert.deepEqual([...left.scores.keys()].sort(), [...right.scores.keys()].sort(), 'incomparable attempt sets');
   const judgeVersions = run => [...new Set([...run.scores.values()].filter(s => s.semantic.state === 'evaluated').map(s => s.judge_version))].sort();
