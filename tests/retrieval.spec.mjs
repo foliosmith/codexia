@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 import {mkdirSync,readFileSync,writeFileSync,existsSync} from 'node:fs';
 import {join,resolve} from 'node:path';
@@ -45,4 +45,78 @@ process.stdout.write(JSON.stringify({cards:[{card_type:'answer',card_id:'answer'
   for(const prompt of prompts){const prior=prompt.context.prior_chapters;expect(prior.every(c=>Array.isArray(c.source_excerpts)&&!('condensed_summary' in c))).toBe(true);expect(prior.flatMap(c=>c.source_excerpts).length).toBeLessThanOrEqual(8);}
   writeFileSync(info.outputPath('retrieval-evidence.json'),JSON.stringify({answer,contexts:contexts()},null,2));
  }finally{const ended=once(server,'exit');server.kill();await ended;}
+});
+
+test('derived explanations retain every cited range after full-book access and additional reading', async ({request}, info) => {
+ const root = info.outputPath('derived-ranges');
+ mkdirSync(root, {recursive:true});
+ const compiler = join(root, 'compiler.mjs');
+ writeFileSync(compiler, `#!/usr/bin/env node
+import {spawnSync} from 'node:child_process';
+const chunks=[];for await(const c of process.stdin)chunks.push(c);
+const input=Buffer.concat(chunks);const request=JSON.parse(input);
+const result=spawnSync(${JSON.stringify(resolve('tests/fixtures/analyzer.mjs'))},[],{input});
+if(result.status!==0){process.stderr.write(result.stderr);process.exit(result.status??1);}
+const output=JSON.parse(result.stdout);
+const ref=b=>({block_id:b.block_id,start_char:0,end_char:[...b.text].length,text_fingerprint:b.text_fingerprint});
+if(request.task==='chapter_analysis'){
+ const own=request.context.chapter.blocks.find(b=>b.kind==='paragraph')||request.context.chapter.blocks.at(-1);
+ const refs=[ref(own)];
+ if(request.context.chapter.chapter_id==='chapter_003'){
+  const prior=request.context.prior_chapters.find(c=>c.chapter_id==='chapter_002').source_excerpts.find(b=>b.text.includes('bronze'));
+  refs.push({...ref(prior),end_char:10},ref(prior));output.summary.deep='PRIOR_CHAPTER_DEPENDENCY';
+ }
+ output.concepts=[{concept_id:request.context.chapter.chapter_id,name:'Source concept',aliases:[],definition_in_this_book:'Local source interpretation.',source_refs:refs}];
+}else if(request.task==='book_synthesis'){
+ const chapters=request.context.chapter_analyses;
+ const refs=id=>chapters.find(c=>c.chapter_id===id).concepts[0].source_refs;
+ const concept=(id,appearances)=>({concept_id:id,name:id,aliases:[id+'-alias'],definition_in_this_book:id+' definition',appearances,related_concepts:[],importance:50,grounding:'grounded'});
+ output.concepts=[concept('LOCAL_CONCEPT',[refs('chapter_003')[0]]),concept('LATER_CHAPTER_DEPENDENCY',[refs('chapter_003')[0],refs('chapter_004')[0]])];
+}
+process.stdout.write(JSON.stringify(output));
+`, {mode:0o755});
+ const pkg = compileSections(root, compiler);
+ const binary = resolve('target/debug/codexia');
+ execFileSync(binary, ['validate', pkg], {stdio:'pipe'});
+ const server = spawn(binary, ['serve', pkg, '--state-dir', join(root,'state'), '--bind', '127.0.0.1:18798'], {stdio:'ignore'});
+ const base = 'http://127.0.0.1:18798';
+ const evidence = [];
+ try {
+  await expect.poll(async()=>{try{return(await request.get(base+'/v1/bootstrap')).status()}catch{return 0}}).toBe(200);
+  const boot = await (await request.get(base+'/v1/bootstrap')).json();
+  const book = base+'/v1/books/'+boot.book.book_id;
+  const location = {chapter_id:'chapter_003',block_id:null,char_offset:null,epub_cfi:null};
+  const create = async()=>await (await request.post(base+'/v1/reader-sessions',{data:{book_id:boot.book.book_id,current_location:location,spoiler_mode:'read_range'}})).json();
+  const content = async id=>await (await request.get(book+'/chapters/'+id+'/content')).json();
+  const confirm = async(session,id,partial=null)=>{
+   const block=partial?(await content(id)).blocks.find(b=>b.text.includes('bronze')):(await content(id)).blocks.at(-1);
+   const response=await request.patch(base+'/v1/reader-sessions/'+session.session_id,{data:{read_until:{chapter_id:id,block_id:block.block_id,char_offset:partial??[...block.text].length,epub_cfi:null}}});
+   expect(response.status()).toBe(200);return response.json();
+  };
+  let session = await confirm(await create(),'chapter_003');
+  const selected = (await content('chapter_003')).blocks.find(b=>b.text.includes('northern'));
+  const explain = async(state,mode='read_range')=>{
+   const response=await request.post(book+'/explain',{data:{selected_text:selected.text,source_ref:{block_id:selected.block_id,start_char:0,end_char:[...selected.text].length,text_fingerprint:selected.text_fingerprint},reader_state:state,spoiler_mode:mode}});
+   expect(response.status()).toBe(200);const result=await response.json();evidence.push({session:state.session_id,mode,result});return result.cards[0].content;
+  };
+  const restricted = await explain(session);
+  expect(restricted.related_concepts.map(c=>c.concept_id)).toEqual(['LOCAL_CONCEPT']);
+  expect(JSON.stringify(restricted)).not.toContain('PRIOR_CHAPTER_DEPENDENCY');
+  expect(JSON.stringify(restricted)).not.toContain('LATER_CHAPTER_DEPENDENCY');
+  const full = await explain(session,'full_book');
+  expect(full.explanation).toBe('PRIOR_CHAPTER_DEPENDENCY');
+  expect(full.related_concepts.map(c=>c.concept_id)).toEqual(['LOCAL_CONCEPT','LATER_CHAPTER_DEPENDENCY']);
+  expect(await explain(session)).toEqual(restricted);
+  session = await confirm(session,'chapter_002',10);
+  expect(JSON.stringify(await explain(session))).not.toContain('PRIOR_CHAPTER_DEPENDENCY');
+  session = await confirm(session,'chapter_002');
+  const priorRead = await explain(session);
+  expect(priorRead.explanation).toBe('PRIOR_CHAPTER_DEPENDENCY');
+  expect(JSON.stringify(priorRead)).not.toContain('LATER_CHAPTER_DEPENDENCY');
+  session = await confirm(session,'chapter_004');
+  expect((await explain(session)).related_concepts.map(c=>c.concept_id)).toEqual(['LOCAL_CONCEPT','LATER_CHAPTER_DEPENDENCY']);
+ } finally {
+  const ended=once(server,'exit');server.kill();await ended;
+  writeFileSync(info.outputPath('derived-range-evidence.json'),JSON.stringify(evidence,null,2));
+ }
 });

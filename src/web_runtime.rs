@@ -2643,7 +2643,7 @@ fn chapter_analysis_refs(analysis: &ChapterAnalysis) -> Vec<AnalysisSourceRef> {
         )
         .collect::<Vec<_>>();
     refs.sort_by(|left, right| left.block_id.cmp(&right.block_id));
-    refs.dedup_by(|left, right| left.block_id == right.block_id);
+    refs.dedup();
     refs
 }
 
