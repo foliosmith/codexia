@@ -19,6 +19,13 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 let input = Buffer.concat(chunks);
 const request = JSON.parse(input);
+if (request.task === 'reflect_on_answer') {
+  const task = JSON.parse(readFileSync(join(directory, 'task.json')));
+  if (task.task !== 'reflect' || typeof task.question !== 'string' || !task.question.trim()) throw new Error('reflection needs a fixed question');
+  request.input.question = task.question;
+  delete request.input.expected_points;
+  input = Buffer.from(JSON.stringify(request));
+}
 const phase = ['chapter_analysis', 'chapter_reanalysis', 'book_synthesis'].includes(request.task) ? 'compile' : 'answer';
 if (phase === 'answer' && process.env.CODEXIA_BENCH_CANDIDATE === 'A1') {
   request.context.chapter_analysis = null;

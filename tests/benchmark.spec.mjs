@@ -432,43 +432,101 @@ test('benchmark calibration admission requires every reference reviewed and ever
   expect(invoke('calibrate', ...args, '--output', info.outputPath('unattributed')).status).toBe(1);
 });
 
-test('benchmark A1 removes derived answers and compares matched attempts only', async ({}, info) => {
-  test.setTimeout(120000);
+test('benchmark A1 uses independent source packages and fixed reflection tasks in both modes', async ({}, info) => {
+  test.setTimeout(180000);
   const suite = info.outputPath('suite');
   cpSync('benchmarks/suites/v0.0', suite, { recursive: true });
-  for (const name of ['cases', 'gold']) {
-    const file = join(suite, `${name}.jsonl`);
-    const row = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse).find(row => (row.id || row.case_id) === 'reflection');
-    writeFileSync(file, JSON.stringify(row) + '\n');
-  }
+  const casesFile = join(suite, 'cases.jsonl');
+  const cases = readFileSync(casesFile, 'utf8').trim().split('\n').map(JSON.parse).filter(row => ['citation', 'reflection'].includes(row.id));
+  const reflection = cases.find(row => row.id === 'reflection');
+  reflection.steps[0].question = 'Under what conditions is the copper sensor reliable?';
+  reflection.steps.push({ ...reflection.steps[0], question: 'Does this retelling preserve the temperature limitation?' });
+  for (const item of cases) item.budget.max_calls = 6;
+  writeFileSync(casesFile, cases.map(row => JSON.stringify(row)+'\n').join(''));
+  const goldFile = join(suite, 'gold.jsonl');
+  writeFileSync(goldFile, readFileSync(goldFile, 'utf8').trim().split('\n').filter(line => ['citation', 'reflection'].includes(JSON.parse(line).case_id)).join('\n')+'\n');
   const catalog = join(suite, 'catalog.json');
-  const left = join(suite, 'a0');
-  const right = join(suite, 'a1');
-  for (const [candidate, run] of [['A0', left], ['A1', right]]) expect(invoke('run', '--catalog', catalog, '--candidate', candidate, '--output', run).status).toBe(0);
-  const a0 = JSON.parse(readFileSync(join(left, 'attempts/reflection-1/artifact.json'))).calls[0].request;
-  const a1 = JSON.parse(readFileSync(join(right, 'attempts/reflection-1/artifact.json'))).calls[0].request;
-  expect(a0.input.expected_points.length).toBeGreaterThan(0);
-  expect(a1.input.expected_points).toBeUndefined();
-  expect(a1.context.chapter_analysis).toBeNull();
-  expect(a1.context.related_concepts).toEqual([]);
-  expect(a1.context.argument_flow).toEqual([]);
-  expect(a1.context.nearby_blocks.length).toBeGreaterThan(0);
-  expect(invoke('resume', '--catalog', catalog, '--output', right).status).toBe(1);
-  const comparison = info.outputPath('comparison');
-  const args = ['--left', left, '--right', right];
-  const result = invoke('compare', ...args, '--output', comparison);
-  expect(result.status, result.stderr).toBe(0);
-  const report = JSON.parse(readFileSync(join(comparison, 'comparison.json')));
-  expect(report.paired_attempts).toBe(1);
-  expect(report.counts.unassessed).toBe(1);
-  expect(report.conclusion).toBe('inconclusive');
-  const reportPath = join(right, 'report.json');
-  const changed = JSON.parse(readFileSync(reportPath));
-  changed.scorer_hash = 'different';
-  writeFileSync(reportPath, JSON.stringify(changed));
-  const rejected = invoke('compare', ...args, '--output', info.outputPath('bad-comparison'));
-  expect(rejected.status).toBe(1);
-  expect(rejected.stderr).toContain('incomparable scorer_hash');
+  const helper = relative(suite, resolve('tests/fixtures/analyzer.mjs'));
+  writeFileSync(join(suite, 'provider.mjs'), `#!/usr/bin/env node
+import {writeFileSync} from 'node:fs';import {spawnSync} from 'node:child_process';import {resolve,dirname} from 'node:path';import {fileURLToPath} from 'node:url';
+const chunks=[];for await(const c of process.stdin)chunks.push(c);
+writeFileSync(process.env.CODEXIA_USAGE_FILE,JSON.stringify({input_tokens:100,output_tokens:20}));
+const result=spawnSync(process.execPath,[resolve(dirname(fileURLToPath(import.meta.url)),${JSON.stringify(helper)})],{input:Buffer.concat(chunks)});process.stdout.write(result.stdout);process.exit(result.status??1);
+`, { mode: 0o755 });
+  const configFile = join(suite, 'provider.json');
+  writeFileSync(configFile, JSON.stringify({ evidence: 'simulation', adapter: './provider.mjs', model: 'synthetic-a1-provider', max_invocations: 20, max_request_bytes: 524288, stop_after_input_tokens: 50000, stop_after_output_tokens: 50000, stop_after_estimated_usd: 1, pricing: { source: 'Synthetic regression rates', as_of: '2026-10-09', input_per_million: 1, cached_input_per_million: 0, output_per_million: 1 } }));
+  for (const mode of ['fixed-package-reader', 'cold-compile-reader']) {
+    const left = join(suite, mode, 'a0');
+    const right = join(suite, mode, 'a1');
+    for (const [candidate, run] of [['A0', left], ['A1', right]]) {
+      const args = ['run', '--catalog', catalog, '--candidate', candidate, '--mode', mode, '--provider-config', configFile, '--output', run];
+      if (candidate === 'A0') args.push('--compile-with-provider');
+      const result = invoke(...args);
+      expect(result.status, result.stderr).toBe(0);
+      const artifact = JSON.parse(readFileSync(join(run, 'attempts/reflection-1/artifact.json')));
+      const answers = artifact.calls.filter(call => call.request?.task === 'reflect_on_answer');
+      expect(answers.map(call => call.request.input.question).sort()).toEqual(reflection.steps.map(step => step.question).sort());
+      expect(answers.every(call => !('expected_points' in call.request.input))).toBe(true);
+      expect(artifact.steps.map(step => step.question)).toEqual(reflection.steps.map(step => step.question));
+      if (candidate === 'A1') {
+        expect(artifact.calls.every(call => call.phase === 'answer')).toBe(true);
+        for (const name of ['citation', 'reflection']) {
+          const output = JSON.parse(readFileSync(join(run, 'attempts', name+'-1', 'artifact.json')));
+          for (const call of output.calls) {
+            expect(call.request.context.chapter_analysis).toBeNull();
+            expect(call.request.context.related_concepts).toEqual([]);
+            expect(call.request.context.argument_flow).toEqual([]);
+            expect(call.request.context.nearby_blocks.length).toBeGreaterThan(0);
+            expect(JSON.stringify(call.request)).not.toContain('Was this chapter registered?');
+            expect(JSON.stringify(call.request)).not.toContain('Offline registration');
+          }
+        }
+        const report = JSON.parse(readFileSync(join(run, 'report.json')));
+        expect(report.structural_passes).toBe(2);
+        expect(report.provider_budget.phases.compile.invocations).toBe(0);
+        expect(report.provider_budget.phases.answer.invocations).toBe(3);
+        expect(report.costs.compile_usd).toBe(0);
+        expect(report.costs.answer_usd).toBeCloseTo(0.00036, 9);
+        expect(JSON.parse(readFileSync(join(run, 'manifest.json'))).compiler).toBe('source-only');
+        const pkg = mode === 'fixed-package-reader' ? join(run, 'packages/river-study/package') : join(run, 'attempts/reflection-1/compilation/package');
+        const checkpoints = JSON.parse(readFileSync(join(pkg, 'checkpoints.json'))).checkpoints;
+        expect(checkpoints.every(c => c.recall_questions.every(q => q.expected_points.length === 0))).toBe(true);
+      }
+    }
+    const comparison = info.outputPath(mode+'-comparison');
+    const result = invoke('compare', '--left', left, '--right', right, '--output', comparison);
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(readFileSync(join(comparison, 'comparison.json')));
+    expect(report.paired_attempts).toBe(2);
+    expect(report.counts.unassessed).toBe(2);
+    expect(report.conclusion).toBe('inconclusive');
+    expect(report.left.compiler).toBe('configured-provider');
+    expect(report.right.compiler).toBe('source-only');
+    expect(invoke('resume', '--catalog', catalog, '--mode', mode, '--candidate', 'A1', '--provider-config', configFile, '--output', right).status).toBe(0);
+    expect(JSON.parse(readFileSync(join(right, 'budget/ledger.json'))).calls).toHaveLength(3);
+    const manifestFile = join(right, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestFile));
+    delete manifest.reflection_protocol;
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    expect(invoke('compare', '--left', left, '--right', right, '--output', info.outputPath(mode+'-stale')).status).toBe(1);
+    manifest.reflection_protocol = 'fixed-question-v1';
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    const reportFile = join(right, 'report.json');
+    const changed = JSON.parse(readFileSync(reportFile));
+    changed.scorer_hash = 'different';
+    writeFileSync(reportFile, JSON.stringify(changed));
+    const rejected = invoke('compare', '--left', left, '--right', right, '--output', info.outputPath(mode+'-bad-scorer'));
+    expect(rejected.status).toBe(1);
+    expect(rejected.stderr).toContain('incomparable scorer_hash');
+  }
+  const denied = join(suite, 'denied');
+  expect(invoke('run', '--catalog', catalog, '--candidate', 'A1', '--provider-config', configFile, '--compile-with-provider', '--output', denied).status).toBe(1);
+  expect(existsSync(denied)).toBe(false);
+  delete reflection.steps[0].question;
+  writeFileSync(casesFile, cases.map(row => JSON.stringify(row)+'\n').join(''));
+  const missing = invoke('validate', '--catalog', catalog);
+  expect(missing.status).toBe(1);
+  expect(missing.stderr).toContain('reflection needs question');
 });
 
 test('benchmark resumes interrupted evidence without rerunning calls and verifies private EPUB identity', async ({}, info) => {

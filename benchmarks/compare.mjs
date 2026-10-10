@@ -31,7 +31,9 @@ export function compare(leftPath, rightPath, output) {
   assert.ok(!existsSync(directory), 'use a fresh comparison output directory');
   const left = load(leftPath);
   const right = load(rightPath);
-  for (const field of ['protocol', 'evidence', 'mode', 'compiler', 'repeat', 'agent_hash', 'registration_analyzer_hash']) assert.equal(left.manifest[field], right.manifest[field], `incomparable ${field}`);
+  for (const field of ['protocol', 'evidence', 'mode', 'reflection_protocol', 'binary_hash', 'benchmark_hash', 'repeat', 'agent_hash', 'registration_analyzer_hash']) assert.equal(left.manifest[field], right.manifest[field], `incomparable ${field}`);
+  const sourceComparison = [left, right].some(run => run.manifest.candidate === 'A1' && run.manifest.compiler === 'source-only') && [left, right].some(run => run.manifest.candidate === 'A0' && ['offline-registration', 'configured-provider'].includes(run.manifest.compiler));
+  assert.ok(sourceComparison || left.manifest.compiler === right.manifest.compiler, 'incomparable compiler');
   assert.equal(left.manifest.provider_config_hash ?? null, right.manifest.provider_config_hash ?? null, 'incomparable provider model, pricing or limits');
   for (const field of ['suite_hash', 'execution_hash', 'scorer_hash']) assert.ok(left.report[field] && left.report[field] === right.report[field], `incomparable ${field}; rescore both runs consistently`);
   assert.deepEqual([...left.scores.keys()].sort(), [...right.scores.keys()].sort(), 'incomparable attempt sets');
@@ -43,7 +45,7 @@ export function compare(leftPath, rightPath, output) {
     return { attempt_id: id, case_id: a.case_id, left_success: a.task_success, right_success: b.task_success, change: !known ? 'unassessed' : a.task_success === b.task_success ? 'unchanged' : b.task_success ? 'improved' : 'regressed', left_hard_failures: a.hard_failures, right_hard_failures: b.hard_failures };
   });
   const counts = Object.fromEntries(['improved', 'regressed', 'unchanged', 'unassessed'].map(change => [change, pairs.filter(p => p.change === change).length]));
-  const result = { protocol: '0.0', evidence: left.manifest.evidence, left: { candidate: left.manifest.candidate, report_hash: left.report_hash }, right: { candidate: right.manifest.candidate, report_hash: right.report_hash }, paired_attempts: pairs.length, independent_cases: new Set(pairs.map(p => p.case_id)).size, counts, conclusion: 'inconclusive', reason: 'Paired descriptive evidence only; offline/replay, unreviewed tasks and small book samples do not establish model superiority.', pairs };
+  const result = { protocol: '0.0', evidence: left.manifest.evidence, left: { candidate: left.manifest.candidate, compiler: left.manifest.compiler, report_hash: left.report_hash }, right: { candidate: right.manifest.candidate, compiler: right.manifest.compiler, report_hash: right.report_hash }, paired_attempts: pairs.length, independent_cases: new Set(pairs.map(p => p.case_id)).size, counts, conclusion: 'inconclusive', reason: 'Paired descriptive evidence only; offline/replay, unreviewed tasks and small book samples do not establish model superiority.', pairs };
   save(join(directory, 'comparison.json'), result);
   return result;
 }

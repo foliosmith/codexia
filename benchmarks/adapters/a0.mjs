@@ -8,7 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { root, read, hash } from '../data.mjs';
 import { save, treeHash, treeBytes } from '../storage.mjs';
 
-export function compile(book, directory, binary, timeoutMs = 120000, budgetDirectory = '', maxInvocations) {
+export function compile(book, directory, binary, timeoutMs = 120000, budgetDirectory = '', maxInvocations, candidate = 'A0') {
+  assert.ok(candidate !== 'A1' || !budgetDirectory, 'A1 cannot use a semantic compiler');
   const deadline = performance.now() + timeoutMs;
   const remaining = () => {
     const value = Math.floor(deadline - performance.now());
@@ -26,13 +27,13 @@ export function compile(book, directory, binary, timeoutMs = 120000, budgetDirec
   const pkg = join(directory, 'package');
   const start = performance.now();
   const config = budgetDirectory ? read(join(budgetDirectory, 'config.json')) : null;
-  const analyzer = config ? join(root, 'benchmarks/adapters/capture.mjs') : join(root, 'tests/fixtures/analyzer.mjs');
+  const analyzer = config ? join(root, 'benchmarks/adapters/capture.mjs') : candidate === 'A1' ? join(root, 'benchmarks/adapters/source-only.mjs') : join(root, 'tests/fixtures/analyzer.mjs');
   const env = { ...process.env, CODEXIA_TEST_GROUNDING_MODE: '', ...(config ? { CODEXIA_BENCH_BUDGET_DIR: budgetDirectory, CODEXIA_BENCH_ATTEMPT: directory, CODEXIA_BENCH_AGENT: config.adapter, CODEXIA_BENCH_MAX_CALLS: String(maxInvocations ?? config.max_invocations), CODEXIA_READER_TIMEOUT_MS: String(timeoutMs), CODEXIA_ANALYZER_MODEL: config.model, CODEXIA_ANALYZER_PROMPT_VERSION: undefined, CODEXIA_ANALYZER_REVISION: hash(JSON.stringify(config) + treeHash(join(root, 'benchmarks'))) } : {}) };
   const output = execFileSync(binary, ['compile', epub, '--out', pkg, '--analyzer-command', analyzer, '--analysis-jobs', '1'], { timeout: remaining(), env });
   execFileSync(binary, ['validate', pkg], { timeout: Math.min(10000, remaining()) });
   const analysisFiles = ['book_map.json', 'concepts.json', 'claims.json', 'entities.json', 'checkpoints.json', 'recall_cards.json'];
   const analysisBytes = treeBytes(join(pkg, 'chapters')) + analysisFiles.filter(name => existsSync(join(pkg, name))).reduce((sum, name) => sum + statSync(join(pkg, name)).size, 0);
-  save(join(directory, 'compile.json'), { mode: config ? 'configured-provider' : 'offline-registration', status: 'completed', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: null, estimated_usd: null, output: output.toString(), package_hash: treeHash(pkg) });
+  save(join(directory, 'compile.json'), { mode: candidate === 'A1' ? 'source-only' : config ? 'configured-provider' : 'offline-registration', status: 'completed', duration_ms: Math.round(performance.now() - start), source_bytes: statSync(epub).size, package_bytes: treeBytes(pkg), analysis_bytes: analysisBytes, usage: candidate === 'A1' ? { input_tokens: 0, output_tokens: 0 } : null, estimated_usd: candidate === 'A1' ? 0 : null, output: output.toString(), package_hash: treeHash(pkg) });
   return pkg;
 }
 
@@ -125,6 +126,7 @@ export async function execute({ item, book, pkg, directory, binary, agent, signa
         assert.ok(lastIndex >= 0, 'unknown persisted reading endpoint');
         for (const [i, block] of chapter.blocks.entries()) if (i <= lastIndex) limits.set(block.block_id, i === lastIndex ? end.char_offset : [...block.text].length);
       }
+      save(join(directory, 'task.json'), { task: step.task, question: step.question ?? null });
       const request = { request_id: `step-${index}`, reader_state: session, spoiler_mode: 'read_range' };
       let response;
       const block = anchors.get(step.selection);
@@ -135,7 +137,7 @@ export async function execute({ item, book, pkg, directory, binary, agent, signa
         const content = checkpoint.cards[0].content;
         response = await api(`${bookPath}/chapters/${block.chapter_id}/reflect`, { request_id: request.request_id, reader_state: session, checkpoint_id: content.checkpoint_id, question_id: content.recall_questions[0].question_id, answer: step.answer });
       }
-      result.steps.push({ task: step.task, response, limits: Object.fromEntries(limits) });
+      result.steps.push({ task: step.task, question: step.question ?? null, response, limits: Object.fromEntries(limits) });
     }
     result.blocks = Object.fromEntries(blocks);
     result.anchors = Object.fromEntries(anchors);

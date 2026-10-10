@@ -83,6 +83,7 @@ export function loadSuite(path) {
     for (const step of item.steps) {
       assert.ok(step.task !== 'ask' || step.question, `${item.id}: ask needs question`);
       assert.ok(step.task === 'ask' || step.selection, `${item.id}: selection required`);
+      assert.ok(step.task !== 'reflect' || step.question, `${item.id}: reflection needs question`);
       assert.ok(step.task !== 'reflect' || step.answer, `${item.id}: reflection needs answer`);
       if (step.selection) assert.ok(book.anchors.has(step.selection), `unknown anchor ${step.selection}`);
       for (const endpoint of step.read) {

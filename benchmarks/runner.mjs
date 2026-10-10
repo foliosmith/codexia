@@ -57,6 +57,7 @@ try {
   assert.ok(['A0', 'A1'].includes(values.candidate), 'candidate must be A0 or A1');
   assert.ok(!(values['provider-config'] && values['agent-command']), 'use either provider-config or an offline/replay agent-command');
   assert.ok(!values['compile-with-provider'] || values['provider-config'], 'compile-with-provider requires provider-config');
+  assert.ok(values.candidate !== 'A1' || !values['compile-with-provider'], 'A1 uses source-only compilation; omit --compile-with-provider');
   assert.ok(['fixed-package-reader', 'cold-compile-reader'].includes(values.mode), 'mode must be fixed-package-reader or cold-compile-reader');
   assert.ok(!values.reviews || ['score', 'report', 'export'].includes(command), '--reviews requires score/report/export');
   if (command === 'score') assert.ok(values.reviews, 'score requires --reviews');
@@ -98,13 +99,14 @@ try {
     const agent = resolve(provider?.adapter || values['agent-command'] || join(root, 'benchmarks/adapters/extract.mjs'));
     if (executing && !provider) assert.notEqual(agent, join(root, 'scripts/online-analyzer.mjs'), 'online adapter requires --provider-config');
     const identity = executing ? { suite_hash: suite.fingerprint, execution_hash: suite.executionHash, provider_config_hash: provider ? hash(JSON.stringify(provider)) : null, binary_hash: hash(readFileSync(binary)), agent_hash: hash(readFileSync(agent)), benchmark_hash: treeHash(join(root, 'benchmarks')), registration_analyzer_hash: hash(readFileSync(join(root, 'tests/fixtures/analyzer.mjs'))) } : null;
+    const compiler = values.candidate === 'A1' ? 'source-only' : values['compile-with-provider'] ? 'configured-provider' : 'offline-registration';
     let manifest;
     if (command === 'run') {
       assert.ok(!existsSync(directory), 'use a fresh output directory');
       mkdirSync(dirname(directory), { recursive: true });
       mkdirSync(directory);
       const started = Date.now();
-      manifest = { protocol: '0.0', ...identity, git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), git_diff_hash: hash(execFileSync('git', ['diff', 'HEAD', '--', 'src', 'benchmarks', 'tests/fixtures/analyzer.mjs'], { cwd: root })), evidence: provider?.evidence || (values['agent-command'] ? 'replay' : 'offline'), candidate: values.candidate, mode: values.mode, compiler: values['compile-with-provider'] ? 'configured-provider' : 'offline-registration', node_version: process.version, repeat, started_at: new Date(started).toISOString(), retention: { content_expires_at: new Date(started + 7 * 86400000).toISOString(), cleanup: 'manual; no automatic deletion' }, status: 'running' };
+      manifest = { protocol: '0.0', ...identity, git_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), git_diff_hash: hash(execFileSync('git', ['diff', 'HEAD', '--', 'src', 'benchmarks', 'tests/fixtures/analyzer.mjs'], { cwd: root })), evidence: provider?.evidence || (values['agent-command'] ? 'replay' : 'offline'), candidate: values.candidate, mode: values.mode, compiler, reflection_protocol: 'fixed-question-v1', node_version: process.version, repeat, started_at: new Date(started).toISOString(), retention: { content_expires_at: new Date(started + 7 * 86400000).toISOString(), cleanup: 'manual; no automatic deletion' }, status: 'running' };
       save(join(directory, 'manifest.json'), manifest);
       if (provider) {
         save(join(directory, 'budget/config.json'), provider);
@@ -114,7 +116,8 @@ try {
       manifest = read(join(directory, 'manifest.json'));
       if (executing) assert.equal(manifest.candidate, values.candidate, 'candidate changed');
       if (executing) assert.equal(manifest.mode, values.mode, 'mode changed');
-      if (executing) assert.equal(manifest.compiler, values['compile-with-provider'] ? 'configured-provider' : 'offline-registration', 'compiler strategy changed');
+      if (executing) assert.equal(manifest.compiler, compiler, 'compiler strategy changed');
+      if (executing) assert.equal(manifest.reflection_protocol, 'fixed-question-v1', 'reflection protocol changed; use a new run');
       if (executing) for (const [key, value] of Object.entries(identity)) assert.equal(manifest[key], value, `${key} changed; use a new run`);
       else if (manifest.execution_hash) assert.equal(manifest.execution_hash, suite.executionHash, 'execution inputs changed; cannot rescore different questions or sources');
       else assert.equal(manifest.suite_hash, suite.fingerprint, 'legacy run needs its original suite; execution identity unavailable');
@@ -130,7 +133,7 @@ try {
           const sharedCompilation = join(directory, 'packages', book.id);
           const compileBudget = values['compile-with-provider'] ? join(directory, 'budget') : '';
           if (manifest.mode === 'fixed-package-reader' && suite.cases.some(c => c.book_id === book.id && c.applicability !== 'not_applicable')) {
-            if (!existsSync(join(sharedCompilation, 'compile.json'))) compile(book, sharedCompilation, binary, 120000, compileBudget);
+            if (!existsSync(join(sharedCompilation, 'compile.json'))) compile(book, sharedCompilation, binary, 120000, compileBudget, undefined, values.candidate);
             assert.equal(treeHash(join(sharedCompilation, 'package')), read(join(sharedCompilation, 'compile.json')).package_hash, 'package changed');
           }
           for (const item of suite.cases.filter(item => item.book_id === book.id)) {
@@ -155,7 +158,7 @@ try {
                 const compilation = manifest.mode === 'cold-compile-reader' ? join(attempt, 'compilation') : sharedCompilation;
                 let compilationData;
                 try {
-                  if (manifest.mode === 'cold-compile-reader') compile(book, compilation, binary, item.budget.timeout_ms, compileBudget, item.budget.max_calls);
+                  if (manifest.mode === 'cold-compile-reader') compile(book, compilation, binary, item.budget.timeout_ms, compileBudget, item.budget.max_calls, values.candidate);
                   compilationData = read(join(compilation, 'compile.json'));
                   const remaining = manifest.mode === 'cold-compile-reader' ? Math.floor(item.budget.timeout_ms - (performance.now() - started)) : item.budget.timeout_ms;
                   if (remaining <= 0) throw Object.assign(new Error('attempt timeout'), { code: 'ETIMEDOUT' });

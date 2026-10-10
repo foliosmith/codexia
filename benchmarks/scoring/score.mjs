@@ -61,7 +61,7 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
   const counts = values => Object.fromEntries([...new Set(values)].map(value => [value, values.filter(v => v === value).length]));
   const execution = counts(trials.map(t => t.status));
   let providerBudget = null;
-  let compileCost = null;
+  let compileCost = manifest.compiler === 'source-only' ? 0 : null;
   let answerCost = null;
   if (manifest.provider_config_hash) {
     const config = read(join(directory, 'budget/config.json'));
@@ -114,7 +114,7 @@ export function report(directory, manifest, suite, trials, reviews = new Map()) 
     dimensions: group(c => c.dimensions), books: group(c => [c.book_id]), languages: group(c => [suite.books.get(c.book_id).language]), tasks: group(c => c.steps.map(s => s.task)), suites: group(c => [c.suite]),
     package_evaluations: packageEvaluations, retrieval,
     mode: manifest.mode, compilations: [...compilations.values()], reader_timings: readerTimings,
-    limitations: ['Draft gold is not independent human review.', `Compiler mode: ${manifest.compiler}; offline/replay/simulation responses are not new online model evidence.`, 'Held-out process isolation, automatic model judge budgeting and hard monetary enforcement are not implemented.'],
+    limitations: ['Draft gold is not independent human review.', `Compiler mode: ${manifest.compiler}; offline/replay/simulation responses are not new online model evidence.`, 'Held-out process isolation and hard monetary enforcement are not implemented; judge costs are recorded separately.', 'Source-only packages contain deterministic structural scaffolding, not generated chapter interpretations. Fixed-question reflection does not evaluate checkpoint question generation.'],
     scores,
   };
   save(join(directory, 'report.json'), result);

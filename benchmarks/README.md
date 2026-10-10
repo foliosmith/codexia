@@ -39,7 +39,7 @@ service, database or new evaluation UI is required.
 
 Execution requires Python 3 (standard-library EPUB construction), an offline-built
 `target/debug/codexia`, and the existing `tests/fixtures/analyzer.mjs` for explicitly
-labelled offline registration. Use `cargo build --offline` first. Every attempt
+labelled offline registration. Use `cargo build --locked --offline` first. Every attempt
 starts a real loopback Reader and a fresh state directory; the default adapter
 extracts offered source blocks and never judges semantic correctness.
 
@@ -113,17 +113,37 @@ set returns nonzero. Passing means agreement on that frozen reference set, not
 universal judge accuracy or proof that the attributed human work occurred.
 The repository's default draft references are never promoted automatically.
 
-`--candidate A1` is the raw-source ablation for **fixed-package Reader** tasks:
-it uses the same reading boundary and lexical retrieval as A0, but strips chapter
-analysis, related concepts, argument flow and reflection expected points before
-invoking the same answering adapter. The current A0 `ask` path already excludes
-those fields, so A0/A1 ask inputs are effectively equivalent; the name alone is
-not a distinct architecture. Reflection uses the same package checkpoint question
-as the task, without its compiled answer. Independent A1 checkpoint generation
-and a full cold-compile comparison remain unimplemented.
+`--candidate A1` builds its own source-only package in either execution mode.
+The deterministic `adapters/source-only.mjs` supplies the structural documents
+required by the existing Compiler and Reader. Its generic checkpoints have no
+compiled answers; summaries, maps and flashcards are explicitly scaffolding,
+not semantic analysis or quality evidence. No model is used for compilation.
+A1 rejects `--compile-with-provider`, records `compiler: source-only`, and reports
+zero compile model tokens/cost while retaining actual local compile time/bytes.
+The answering adapter, reading boundary, lexical retrieval and citation checks
+are shared with A0. A1 strips chapter analysis, concepts, argument flow and
+expected points from answering requests. A0 `ask` already excludes those fields,
+so its answering path remains equivalent; do not infer a quality difference
+from the candidate name.
+
+Every `reflect` step must declare `question` and `answer`. Both candidates use
+that frozen question; the capture adapter replaces the package question and
+removes its unrelated expected points before dispatch. This evaluates feedback
+on a fixed task, not the quality of generated checkpoint questions. The actual
+question is retained per step, in provider requests and in blinded review packets.
+Only the current task is written to the attempt's private `task.json`; gold and
+other questions are not supplied to the answering adapter. Existing Reader
+checkpoint admission, persisted reflection and output validation still run.
+
+New runs declare `reflection_protocol: fixed-question-v1`. Add explicit questions
+to a new version of any legacy suite; keep the old suite and runs as historical
+evidence. Legacy executions cannot resume under the new protocol or be compared
+with new runs. A1 has its own package and never reuses an A0 checkpoint/analysis.
 
 `compare` requires matching inputs, gold, scorer, answering adapter, repeat count,
-execution mode and judge versions. It checks artifact hashes, retains all paired
+execution mode, binary/benchmark identity, reflection protocol and judge versions.
+The intentional A0 semantic-compiler versus A1 source-only difference is allowed
+and recorded on both sides of the comparison; other compiler mismatches fail. It checks artifact hashes, retains all paired
 attempts and reports unknowns separately from regressions/improvements. Reports
 remain descriptive and inconclusive with offline evidence; they do not select a
 winner from missing semantic judgments. Changed judges require both runs to be
@@ -278,22 +298,38 @@ attempts retain their compile-call counts even when final artifacts were not sav
 An exhausted budget can leave a partial package and no answers; this is a recorded
 failure, not permission to silently raise a limit or fall back to offline answers.
 
-### DeepSeek bounded Reader smoke
+### DeepSeek bounded Compiler and Reader runs
 
 Use `benchmarks/adapters/deepseek.mjs` as the configured adapter and supply
 `DEEPSEEK_API_KEY` only through the process environment. Select an explicit
 available model and record current official USD rates in the private provider
 configuration. Never store the key in that configuration or captured inputs.
 The adapter uses the fixed official HTTPS endpoint, rejects redirects, performs
-one request without retries, disables thinking, caps input at 65,536 bytes and
-output at 1,024 tokens, and times out after 45 seconds. Allow a longer case
-timeout for Reader startup. Token usage is retained even for truncated or invalid
-JSON output; missing usage stops subsequent dispatch through the shared ledger.
+one request without retries, disables thinking and caps every input at 65,536
+bytes. Unsupported task names are rejected before dispatch.
 
-This adapter is for short Reader requests and refuses compilation tasks. Keep
-compilation offline for this smoke; configured-provider Compiler acceptance is
-separate. Start with original public fixtures and a small invocation allowance.
-Reported costs are estimates using the supplied pricing snapshot, not invoices.
+| Task | Maximum output tokens | HTTP timeout |
+|---|---:|---:|
+| Chapter analysis/reanalysis and book synthesis | 8,192 | 90 seconds |
+| Reader explanation/question/reflection and semantic Judge | 1,024 | 45 seconds |
+
+These are per-request limits. Set the case deadline and invocation allowance for
+the entire workflow, including compilation and Reader startup. A small one-chapter
+cold run with one explanation and one reflection needs four invocations: chapter
+analysis, synthesis, explanation and reflection. Real work can time out or exceed
+the output limit; it must retain a failure, never silently truncate a valid answer.
+The 64 KiB input limit can reject longer chapters or larger synthesis requests.
+
+Token usage is retained even for truncated or invalid JSON output; missing usage
+stops subsequent dispatch through the shared ledger. Compiler publication and
+Reader citation/range validation remain owned by the existing runtime.
+
+Use `--compile-with-provider` with A0 to enable model compilation explicitly;
+without it, compilation remains offline registration. A1 stays source-only.
+Start with original public fixtures and a small invocation allowance. The
+Compiler/Reader path is covered with local simulated HTTP responses; that does
+not establish live provider reliability or semantic quality. Reported costs use
+the supplied pricing snapshot and are estimates, not invoices or hard spend caps.
 
 ### Automatic calibration judgments
 

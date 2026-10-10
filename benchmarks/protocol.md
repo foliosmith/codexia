@@ -2,7 +2,13 @@
 
 A case is one task (possibly several ordered Reader interactions), on one fixed
 source version, under a declared reading boundary and budget. Attempts never
-increase the number of independent cases or books. Reading endpoints are Unicode
+increase the number of independent cases or books. Reflection steps freeze both
+the question and the user's answer. `fixed-question-v1` replaces a package's
+checkpoint prompt and omits its unrelated expected points at provider dispatch
+for both candidates; it measures feedback, not generated-question quality.
+A1 uses a separately compiled deterministic source-only package with no semantic
+Compiler calls. Structural scaffolding is not an analytical result. Its local
+compilation time and bytes are measured; its model compilation cost is zero. Reading endpoints are Unicode
 scalar offsets; confirming a chapter does not confirm skipped chapters.
 
 Catalog, case, book and gold schemas live in `schemas/`. Original source anchors
