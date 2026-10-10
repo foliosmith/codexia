@@ -6,7 +6,7 @@ remain in ignored `private/` storage.
 ## Online compiler (5.2)
 
 ```sh
-cargo build --offline
+cargo build --locked --offline
 CODEXIA_ANALYZER_MODEL=gpt-6-astra node scripts/accept-online.mjs \
   private/golden-books/catalog.json private/acceptance/online
 CODEXIA_ANALYZER_MODEL=gpt-6-astra node scripts/compare-analyzers.mjs \

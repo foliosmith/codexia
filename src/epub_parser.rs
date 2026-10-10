@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use pagelet::{
     document::ChapterIr as PageletChapterIr,
-    epub::{self, BookSummary, NavigationItem, OpenOptions},
+    engine::{BookSession, Engine},
+    epub::{NavigationItem, OpenOptions},
 };
 
 use crate::{
@@ -23,61 +24,71 @@ pub fn parse_epub_with_options(
     open_options: OpenOptions,
     normaliser_options: &NormaliserOptions,
 ) -> Result<BookIr, String> {
-    let summary = epub::open_book_with_options(bytes.to_vec(), open_options)
+    let session = Engine::builder()
+        .compatibility(open_options.compatibility_mode)
+        .limits(open_options.limits)
+        .build()
+        .open_bytes(bytes.to_vec())
         .map_err(|error| error.to_string())?;
+    parse_book_session_with_options(&session, normaliser_options)
+}
+
+/// Compile an already-open pagelet book session into normalized Codexia BookIR.
+pub fn parse_book_session(session: &BookSession) -> Result<BookIr, String> {
+    parse_book_session_with_options(session, &NormaliserOptions::default())
+}
+
+/// Compile an existing pagelet session with explicit normalizer options.
+pub fn parse_book_session_with_options(
+    session: &BookSession,
+    normaliser_options: &NormaliserOptions,
+) -> Result<BookIr, String> {
+    let package = session.package();
 
     let metadata = Metadata {
-        title: summary.package.metadata.title.as_deref().map(Arc::from),
-        identifier: summary
-            .package
-            .metadata
-            .identifier
-            .as_deref()
-            .map(Arc::from),
-        language: summary.package.metadata.language.as_deref().map(Arc::from),
-        package_version: Arc::from(summary.package.metadata.package_version.as_str()),
+        title: package.metadata.title.as_deref().map(Arc::from),
+        identifier: package.metadata.identifier.as_deref().map(Arc::from),
+        language: package.metadata.language.as_deref().map(Arc::from),
+        package_version: Arc::from(package.metadata.package_version.as_ref()),
     };
 
-    let toc = epub3_nested_toc(bytes, &summary, open_options).unwrap_or_else(|| {
-        summary
-            .navigation
+    let toc = epub3_nested_toc(session).unwrap_or_else(|| {
+        session
+            .navigation()
             .toc
             .iter()
             .map(map_toc_entry)
             .collect::<Vec<_>>()
     });
 
-    let spine = summary
-        .package
+    let spine = package
         .spine
         .iter()
         .enumerate()
         .map(|(spine_index, item)| {
-            let href = summary
-                .package
+            let href = package
                 .manifest
                 .iter()
                 .find(|manifest_item| manifest_item.id == item.idref)
-                .map(|manifest_item| Arc::from(manifest_item.resolved_path.as_str()));
+                .map(|manifest_item| Arc::from(manifest_item.resolved_path.as_ref()));
             SpineEntry {
                 spine_index: u32::try_from(spine_index).unwrap_or(u32::MAX),
-                idref: Arc::from(item.idref.as_str()),
+                idref: Arc::from(item.idref.as_ref()),
                 href,
                 linear: item.linear,
             }
         })
         .collect::<Vec<_>>();
 
-    let mut chapters = Vec::with_capacity(summary.package.spine.len());
-    for (spine_index, spine_item) in summary.package.spine.iter().enumerate() {
-        let manifest_item = summary
-            .package
+    let mut chapters = Vec::with_capacity(package.spine.len());
+    for (spine_index, spine_item) in package.spine.iter().enumerate() {
+        let manifest_item = package
             .manifest
             .iter()
             .find(|item| item.id == spine_item.idref);
         if let Some(manifest_item) = manifest_item {
             let is_xhtml = matches!(
-                manifest_item.media_type.as_str(),
+                manifest_item.media_type.as_ref(),
                 "application/xhtml+xml" | "text/html"
             );
             if !is_xhtml {
@@ -90,12 +101,8 @@ pub fn parse_epub_with_options(
             }
         }
 
-        match epub::open_spine_item_chapter_ir_with_options(
-            bytes.to_vec(),
-            spine_index,
-            open_options,
-        ) {
-            Ok(chapter) => chapters.push(chapter),
+        match session.open_spine_item(spine_index) {
+            Ok(chapter) => chapters.push((*chapter).clone()),
             Err(error) => return Err(format!("spine item {spine_index} failed to parse: {error}")),
         }
     }
@@ -117,22 +124,13 @@ fn map_toc_entry(item: &NavigationItem) -> TocEntry {
     }
 }
 
-fn epub3_nested_toc(
-    bytes: &[u8],
-    summary: &BookSummary,
-    open_options: OpenOptions,
-) -> Option<Vec<TocEntry>> {
-    let nav_item = summary.package.manifest.iter().find(|item| {
+fn epub3_nested_toc(session: &BookSession) -> Option<Vec<TocEntry>> {
+    let nav_item = session.package().manifest.iter().find(|item| {
         item.properties
             .iter()
             .any(|property| property.split_whitespace().any(|value| value == "nav"))
     })?;
-    let resource = summary
-        .resources
-        .iter()
-        .find(|resource| resource.path.as_ref() == nav_item.resolved_path)?;
-    let payload =
-        epub::read_resource_bytes_with_options(bytes.to_vec(), resource.id, open_options).ok()?;
+    let payload = session.read_resource(nav_item.resource_id?).ok()?;
     let document = String::from_utf8(payload.bytes).ok()?;
     let toc = parse_epub3_toc(&document);
     (!toc.is_empty()).then_some(toc)
@@ -290,7 +288,10 @@ mod tests {
     fn parses_structure_semantics_fingerprints_cfi_and_noise() {
         let bytes = epub_fixture("Plain paragraph.");
         let first = parse_epub(&bytes).expect("parse fixture");
-        let second = parse_epub(&bytes).expect("repeat parse fixture");
+        let session = pagelet::engine::Engine::new()
+            .open_bytes(bytes)
+            .expect("open shared session");
+        let second = parse_book_session(&session).expect("parse shared session");
 
         assert_eq!(first.metadata.title.as_deref(), Some("Codexia Fixture"));
         assert_eq!(first.spine.len(), 5);
